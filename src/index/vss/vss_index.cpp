@@ -15,7 +15,7 @@
 #include "index/vss/vss_index.hpp"
 
 #include <random>
-#include "index/vss/vss_parallel_executor.hpp"
+#include "index/core/vss_parallel_executor.hpp"
 
 #include "index/vss/vss_module.hpp"
 
