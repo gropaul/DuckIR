@@ -1,5 +1,6 @@
 set(EXTENSION_SOURCES
     ${EXTENSION_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/rg_partitioned_index.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vss/vss_index.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vss/vss_storage.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/vss/vss_index_info_function.cpp
