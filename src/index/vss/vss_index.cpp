@@ -192,16 +192,6 @@ void VSSIndex::ReserveTableScanMetadata(const idx_t num_rows) {
 	table_scan_reserved_bytes += bytes;
 }
 
-void VSSIndex::UpdateReservedMemory(const int64_t delta) {
-	if (delta > 0) {
-		buffer_manager.ReserveMemory(static_cast<idx_t>(delta));
-		reserved_memory_bytes += static_cast<idx_t>(delta);
-	} else if (delta < 0) {
-		buffer_manager.FreeReservedMemory(static_cast<idx_t>(-delta));
-		reserved_memory_bytes -= static_cast<idx_t>(-delta);
-	}
-}
-
 /******************************************************************
  * Index creation and search methods specific to the parallel implementation
  ******************************************************************/
@@ -291,48 +281,6 @@ VSSIndex::GetClustersAccessOrderForRowGroup(const idx_t row_group_idx, const flo
 /******************************************************************
  * Index maintenance
  ******************************************************************/
-
-// Called by DROP INDEX.
-// Dropping the allocator's buffers marks their blocks modified; DuckDB frees them at the next checkpoint.
-void VSSIndex::ResetStorage(IndexLock &lock) {
-	// DuckDB destroys the index next (it rebuilds only ART indexes in place): first, the queries searching it finish.
-	{
-		std::unique_lock<std::mutex> pins(search_pins_lock);
-		is_retired = true;
-		search_pins_released.wait(pins, [&] { return search_pins == 0; });
-	}
-	auto _lock = rwlock.GetExclusiveLock();
-
-	allocator->Reset();
-	directory_chain = VSSBlockChain();
-	rotation_chain = VSSBlockChain();
-	saq_model_chain = VSSBlockChain();
-	ResetPersistedChains();
-}
-
-bool VSSIndex::MergeIndexes(IndexLock &state, BoundIndex &other_index) {
-	throw NotImplementedException("VSSIndex::MergeIndexes() not implemented");
-}
-
-void VSSIndex::Vacuum(IndexLock &state) {
-}
-
-void VSSIndex::Verify(IndexLock &state) {
-	throw NotImplementedException("VSSIndex::Verify() not implemented");
-}
-
-string VSSIndex::ToString(IndexLock &state, bool display_ascii) {
-	throw NotImplementedException("VSSIndex::ToString() not implemented");
-}
-
-void VSSIndex::VerifyAllocations(IndexLock &state) {
-	throw NotImplementedException("VSSIndex::VerifyAllocations() not implemented");
-}
-
-// Called in debug builds: at most one empty buffer.
-void VSSIndex::VerifyBuffers(IndexLock &state) {
-	allocator->VerifyBuffers();
-}
 
 idx_t VSSIndex::GetInMemorySize(IndexLock &state) const {
 	auto _lock = rwlock.GetSharedLock();
