@@ -12,12 +12,12 @@
 #include "duckdb/transaction/transaction_data.hpp"
 #include "pdx/common.hpp"
 #include "pdx/utils.hpp"
-#include "index/vss_index.hpp"
+#include "index/vss/vss_index.hpp"
 
 #include <random>
-#include "index/vss_parallel_executor.hpp"
+#include "index/vss/vss_parallel_executor.hpp"
 
-#include "index/vss_module.hpp"
+#include "index/vss/vss_module.hpp"
 
 #include "duckdb/planner/operator/logical_get.hpp"
 

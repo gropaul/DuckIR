@@ -3,7 +3,7 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
-#include "index/search/vss_search_guard.hpp"
+#include "index/vss/search/vss_search_guard.hpp"
 
 namespace duckdb {
 

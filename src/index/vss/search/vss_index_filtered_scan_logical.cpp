@@ -1,8 +1,8 @@
-#include "index/search/vss_index_filtered_scan_logical.hpp"
+#include "index/vss/search/vss_index_filtered_scan_logical.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 
-#include "index/search/vss_index_filtered_scan_physical.hpp"
+#include "index/vss/search/vss_index_filtered_scan_physical.hpp"
 
 namespace duckdb {
 
