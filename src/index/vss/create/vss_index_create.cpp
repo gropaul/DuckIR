@@ -9,7 +9,7 @@
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
 #include "index/vss/vss_index.hpp"
-#include "index/core/vss_parallel_executor.hpp"
+#include "index/vss/vss_parallel_executor.hpp"
 
 namespace duckdb {
 

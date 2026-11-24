@@ -12,7 +12,7 @@
 
 #include "index/vss/vss_blob_codec.hpp"
 #include "index/vss/vss_index.hpp"
-#include "index/core/vss_parallel_executor.hpp"
+#include "index/vss/vss_parallel_executor.hpp"
 
 #include "pdx/ivf_searcher.hpp"
 
