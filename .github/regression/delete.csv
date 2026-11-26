@@ -1,0 +1,3 @@
+benchmark/vss/delete_f32.benchmark
+benchmark/vss/delete_u8.benchmark
+benchmark/vss/delete_u4.benchmark

@@ -1,19 +1,6 @@
 # name: benchmark/vss/create_index_f32.benchmark
-# description: CREATE INDEX with f32 on 491,520 pseudo-random embeddings of 128 dimensions (4 row groups)
+# description: create_index with f32 quantization
 # group: [vss]
 
-name Create DUCKIR_VSS f32
-group vss
-
-require core_functions
-
-require duckir
-
-load
-CREATE TABLE t AS SELECT range AS id, list_transform(range(128), lambda d: (hash(range * 128 + d) % 1000000)::FLOAT / 1000000)::FLOAT[128] AS emb FROM range(491520);
-
-run
-CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = 'f32', seed = 0);
-
-cleanup
-DROP INDEX idx;
+template benchmark/vss/create_index.benchmark.in
+QUANTIZATION=f32

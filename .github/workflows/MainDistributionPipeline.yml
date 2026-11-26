@@ -39,3 +39,7 @@ jobs:
     needs: duckdb-stable-build
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/RegressionTest.yml
+    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts.
+    permissions:
+      actions: read
+      contents: read

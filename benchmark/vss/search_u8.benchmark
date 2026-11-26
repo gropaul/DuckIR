@@ -1,0 +1,6 @@
+# name: benchmark/vss/search_u8.benchmark
+# description: search with u8 quantization
+# group: [vss]
+
+template benchmark/vss/search.benchmark.in
+QUANTIZATION=u8

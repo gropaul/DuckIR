@@ -11,3 +11,5 @@ test/python/__pycache__/
 compile_commands.json
 # In-memory DuckDB temp file directory.
 .tmp
+# SIFT1M, written by benchmark/vss/prepare_sift1m.py
+benchmark/data/

@@ -1,0 +1,3 @@
+benchmark/vss/search_f32.benchmark
+benchmark/vss/search_u8.benchmark
+benchmark/vss/search_u4.benchmark
