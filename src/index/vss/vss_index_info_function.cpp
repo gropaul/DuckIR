@@ -7,9 +7,9 @@
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 
-#include "index/search/vss_search_guard.hpp"
-#include "index/vss_index.hpp"
-#include "index/vss_module.hpp"
+#include "index/vss/search/vss_search_guard.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/vss_module.hpp"
 
 namespace duckdb {
 

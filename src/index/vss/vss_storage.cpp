@@ -1,4 +1,4 @@
-#include "index/vss_storage.hpp"
+#include "index/vss/vss_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"

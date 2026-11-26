@@ -1,4 +1,4 @@
-#include "index/search/vss_index_join_physical.hpp"
+#include "index/vss/search/vss_index_join_physical.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
@@ -10,9 +10,9 @@
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 
-#include "index/vss_blob_codec.hpp"
-#include "index/vss_index.hpp"
-#include "index/vss_parallel_executor.hpp"
+#include "index/vss/vss_blob_codec.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/vss_parallel_executor.hpp"
 
 #include "pdx/ivf_searcher.hpp"
 

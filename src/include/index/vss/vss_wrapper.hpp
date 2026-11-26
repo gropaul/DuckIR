@@ -23,8 +23,8 @@
 #include "pdx/ivf_searcher.hpp"
 #include "pdx/pruners/adsampling.hpp"
 #include "pdx/quantizers/saq.hpp"
-#include "index/vss_index_utils.hpp"
-#include "index/vss_storage.hpp"
+#include "index/vss/vss_index_utils.hpp"
+#include "index/vss/vss_storage.hpp"
 
 namespace duckdb {
 

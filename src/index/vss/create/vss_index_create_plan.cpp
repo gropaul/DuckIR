@@ -8,8 +8,8 @@
 #include "duckdb/execution/operator/filter/physical_filter.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 
-#include "index/vss_index.hpp"
-#include "index/create/vss_index_create.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/create/vss_index_create.hpp"
 
 #include <algorithm>
 

@@ -1,6 +1,6 @@
-#include "index/search/vss_index_filtered_scan_physical.hpp"
+#include "index/vss/search/vss_index_filtered_scan_physical.hpp"
 #include "duckdb/parallel/event.hpp"
-#include "index/vss_index.hpp"
+#include "index/vss/vss_index.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_lock.hpp"

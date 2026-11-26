@@ -1,6 +1,6 @@
-#include "index/vss_blob_functions.hpp"
-#include "index/vss_blob_codec.hpp"
-#include "index/vss_module.hpp"
+#include "index/vss/vss_blob_functions.hpp"
+#include "index/vss/vss_blob_codec.hpp"
+#include "index/vss/vss_module.hpp"
 
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/array_vector.hpp"

@@ -1,4 +1,4 @@
-#include "index/create/vss_index_create.hpp"
+#include "index/vss/create/vss_index_create.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
@@ -7,8 +7,8 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
 
-#include "index/vss_index.hpp"
-#include "index/vss_parallel_executor.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/vss_parallel_executor.hpp"
 
 namespace duckdb {
 

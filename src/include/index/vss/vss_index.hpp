@@ -16,10 +16,10 @@
 #include <condition_variable>
 
 #include "pdx/common.hpp"
-#include "index/vss_memory_allocator.hpp"
-#include "index/vss_storage.hpp"
-#include "index/vss_wrapper.hpp"
-#include "index/search/vss_search_guard.hpp"
+#include "index/vss/vss_memory_allocator.hpp"
+#include "index/vss/vss_storage.hpp"
+#include "index/vss/vss_wrapper.hpp"
+#include "index/vss/search/vss_search_guard.hpp"
 
 namespace duckdb {
 

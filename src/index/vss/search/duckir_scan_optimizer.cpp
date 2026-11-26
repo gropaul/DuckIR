@@ -28,15 +28,15 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_table.hpp"
 
-#include "index/vss_blob_codec.hpp"
+#include "index/vss/vss_blob_codec.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
-#include "index/vss_module.hpp"
-#include "index/vss_index.hpp"
-#include "index/search/vss_index_filtered_scan_logical.hpp"
-#include "index/search/vss_index_join_logical.hpp"
-#include "index/search/vss_index_scan_logical.hpp"
-#include "index/search/vss_index_scan_physical.hpp"
+#include "index/vss/vss_module.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/search/vss_index_filtered_scan_logical.hpp"
+#include "index/vss/search/vss_index_join_logical.hpp"
+#include "index/vss/search/vss_index_scan_logical.hpp"
+#include "index/vss/search/vss_index_scan_physical.hpp"
 
 namespace duckdb {
 

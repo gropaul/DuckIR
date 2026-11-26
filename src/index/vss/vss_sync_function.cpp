@@ -4,8 +4,8 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/storage/data_table.hpp"
 
-#include "index/vss_index.hpp"
-#include "index/vss_module.hpp"
+#include "index/vss/vss_index.hpp"
+#include "index/vss/vss_module.hpp"
 
 namespace duckdb {
 
