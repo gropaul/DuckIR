@@ -1,5 +1,5 @@
 # name: benchmark/vss/sync_update.benchmark.in
-# description: UPDATE of every 10th row to the next row's embedding in an indexed table of the first ROWS SIFT1M vectors (benchmark/vss/config.benchmark.in), then a sync: the update deletes the old rows at commit and the sync indexes the new ones
+# description: UPDATE of every 10th row to the next row's embedding in an indexed table of the first rows SIFT1M vectors (benchmark/vss/config.benchmark.in), then a sync: the update deletes the old rows at commit and the sync indexes the new ones
 # group: [vss]
 
 name Sync DUCKIR_VSS ${QUANTIZATION} after update
@@ -14,10 +14,10 @@ require duckir
 include benchmark/vss/config.benchmark.in
 
 load
-ATTACH '${BENCHMARK_DIR}/vss_sync_update_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${ROW_GROUP_SIZE});
+ATTACH '${BENCHMARK_DIR}/vss_sync_update_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
 USE vss;
 SET checkpoint_threshold = '10GB';
-CREATE OR REPLACE TABLE base AS SELECT id, emb::FLOAT[128] AS emb FROM read_parquet('benchmark/data/sift1m_base.parquet') WHERE id < ${ROWS};
+CREATE OR REPLACE TABLE base AS SELECT id, emb::FLOAT[128] AS emb FROM read_parquet('benchmark/data/sift1m_base.parquet') WHERE id < ${rows};
 CREATE OR REPLACE TABLE new_emb AS SELECT id - 1 AS id, emb FROM base WHERE id % 10 = 1;
 CREATE OR REPLACE TABLE t AS FROM base;
 CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
