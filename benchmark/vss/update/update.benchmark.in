@@ -1,0 +1,39 @@
+# name: benchmark/vss/update/update.benchmark.in
+# description: UPDATE of every 10th row to the next row's embedding in an indexed table of the first rows SIFT1M vectors, then a sync: the update deletes the old rows at commit and the sync indexes the new ones
+# group: [vss]
+
+name Sync DUCKIR_VSS ${QUANTIZATION} after update
+
+# duckir looks up array_distance when it loads, so core_functions has to load first.
+require core_functions
+
+require duckir
+
+include benchmark/vss/sift1m.benchmark.in
+
+cache sift1m.duckdb
+
+load
+CREATE TABLE base AS SELECT idx AS id, emb::FLOAT[128] AS embedding FROM 'hf://datasets/open-vdb/sift-128-euclidean/train/train-00001-of-00001.parquet';
+ATTACH '${BENCHMARK_DIR}/vss_update_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
+USE vss;
+SET checkpoint_threshold = '10GB';
+CREATE OR REPLACE TABLE updated_embeddings AS SELECT id - 1 AS id, embedding FROM sift1m.base WHERE id < ${rows} AND id % 10 = 1;
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);
+
+reload
+ATTACH '${BENCHMARK_DIR}/vss_update_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
+USE vss;
+SET checkpoint_threshold = '10GB';
+CREATE OR REPLACE TABLE updated_embeddings AS SELECT id - 1 AS id, embedding FROM sift1m.base WHERE id < ${rows} AND id % 10 = 1;
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);
+
+run
+UPDATE vectors SET embedding = updated_embeddings.embedding FROM updated_embeddings WHERE vectors.id = updated_embeddings.id;
+CALL duckir_vss_sync_index('vectors_index');
+
+cleanup
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);

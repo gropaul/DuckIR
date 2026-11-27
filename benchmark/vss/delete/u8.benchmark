@@ -1,0 +1,6 @@
+# name: benchmark/vss/delete/u8.benchmark
+# description: delete with u8 quantization
+# group: [vss]
+
+template benchmark/vss/delete/delete.benchmark.in
+QUANTIZATION=u8

@@ -1,0 +1,6 @@
+# name: benchmark/vss/create/u8.benchmark
+# description: create with u8 quantization
+# group: [vss]
+
+template benchmark/vss/create/create.benchmark.in
+QUANTIZATION=u8

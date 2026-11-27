@@ -1,0 +1,71 @@
+#
+# Builds DuckDB's benchmark runner, with httpfs for benchmarks that download their data, for the regression test, and
+# lists its benchmark folders. Called by the main distribution pipeline in parallel with the extension builds;
+# RegressionTest.yml runs once both are done.
+#
+name: Regression Prepare
+on:
+  workflow_call:
+    outputs:
+      run_regression:
+        value: ${{ jobs.benchmark-runner.outputs.run_regression }}
+      folders:
+        value: ${{ jobs.benchmark-runner.outputs.folders }}
+
+jobs:
+  # DuckDB's benchmark runner has no DuckIR code: it loads duckir.duckdb_extension, so the base and the PR share it.
+  benchmark-runner:
+    name: Build benchmark runner
+    runs-on: ubuntu-latest
+    outputs:
+      run_regression: ${{ steps.changes.outputs.run_regression }}
+      folders: ${{ steps.changes.outputs.folders }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The regression runs when the PR changes code or benchmarks, and pins the same DuckDB as its base: the base's
+      # extension does not load into another DuckDB version. A push to main only fills the caches, which every PR reads.
+      - name: Detect changes and list the benchmark folders
+        id: changes
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "prepare=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "${BASE_REF}...HEAD" |
+            grep -qE '^(src/|benchmark/|\.github/regression/|\.github/settings\.env$|CMakeLists\.txt$|extension_config\.cmake$|vcpkg\.json$)' &&
+            [ "$(git rev-parse HEAD:duckdb)" = "$(git rev-parse "${BASE_REF}:duckdb")" ]; then
+            echo "prepare=true" >> "$GITHUB_OUTPUT"
+            echo "run_regression=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "duckdb_commit=$(git rev-parse HEAD:duckdb)" >> "$GITHUB_OUTPUT"
+          source .github/settings.env
+          echo "folders=$(find $REGRESSION_BENCHMARK_FOLDERS -name '*.benchmark' -exec dirname {} \; | sort -u | jq -Rsc 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore benchmark runner
+        id: cache
+        if: steps.changes.outputs.prepare == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: benchmark_runner
+          key: benchmark-runner-linux_amd64-${{ steps.changes.outputs.duckdb_commit }}-${{ hashFiles('.github/workflows/RegressionPrepare.yml') }}
+
+      - name: Build benchmark runner
+        if: steps.changes.outputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev libcurl4-openssl-dev
+          git submodule update --init duckdb
+          cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="$PWD/duckdb/.github/config/extensions/httpfs.cmake" \
+            -DSTATICALLY_LINK_EXTENSIONS="core_functions;parquet;json;icu;httpfs" \
+            -DOVERRIDE_GIT_DESCRIBE="$(git -C duckdb describe --tags)" -S duckdb -B build/runner
+          cmake --build build/runner --target benchmark_runner
+          cp build/runner/benchmark/benchmark_runner benchmark_runner
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.changes.outputs.prepare == 'true'
+        with:
+          name: benchmark-runner
+          path: benchmark_runner

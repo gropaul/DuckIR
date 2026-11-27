@@ -1,0 +1,96 @@
+#
+# Compares the benchmarks of the PR's extension with the base branch's, with DuckDB's regression runner. Called by the
+# main distribution pipeline after it built the extension and RegressionPrepare.yml built the benchmark runner: the
+# artifacts of one workflow run are only shared within it. RegressionReport.yml turns the logs into the report.
+#
+name: Regression Test
+on:
+  workflow_call:
+    inputs:
+      folders:
+        description: JSON list of the benchmark folders, one regression job each
+        type: string
+        required: true
+
+jobs:
+  # One job per benchmark folder, which runs every .benchmark file in it.
+  regression:
+    name: ${{ matrix.folder }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(inputs.folders) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: benchmark-runner
+          path: artifacts/runner
+
+      - name: Download the PR's extension
+        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: duckir-*-extension-linux_amd64
+          path: artifacts/pr
+
+      - name: Download the base's extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_BRANCH: ${{ github.base_ref }}
+        run: |
+          # A push or a manual dispatch on the base branch, never a PR run whose head branch has the same name.
+          run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow MainDistributionPipeline.yml \
+            --branch "$BASE_BRANCH" --status success --limit 20 --json databaseId,event \
+            --jq '[.[] | select(.event == "push" or .event == "workflow_dispatch")][0].databaseId')"
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --pattern 'duckir-*-extension-linux_amd64' \
+            --dir artifacts/base
+
+      # The layout test_runner.py expects: the extension in the repository directory next to each runner.
+      - name: Lay out the base and the PR
+        run: |
+          chmod +x artifacts/runner/benchmark_runner
+          for side in base pr; do
+            mkdir -p "build/$side/release/benchmark" "build/$side/release/repository/duckdb/linux_amd64"
+            cp artifacts/runner/benchmark_runner "build/$side/release/benchmark/"
+            cp "$(find "artifacts/$side" -name duckir.duckdb_extension)" \
+              "build/$side/release/repository/duckdb/linux_amd64/"
+          done
+
+      # Reads the labels now rather than from the event, so re-running the job after adding the label picks it up.
+      - name: Run regression benchmarks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          source .github/settings.env
+          ls ${{ matrix.folder }}/*.benchmark > benchmarks.csv
+          # With the label, the arguments of the folder's suite, e.g. REGRESSION_EXTENDED_ARGUMENTS_VSS for benchmark/vss/create.
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' | grep -qx extended-regression-tests; then
+            suite_arguments="REGRESSION_EXTENDED_ARGUMENTS_$(echo "${{ matrix.folder }}" | cut -d/ -f2 | tr a-z A-Z)"
+            for argument in ${!suite_arguments}; do
+              arguments="$arguments --benchmark-argument $argument"
+            done
+          fi
+          # Runs the multi-threaded comparison after a failing single-threaded one too, then fails with its exit code.
+          set +e -o pipefail
+          status=0
+          for threads in 1 "$REGRESSION_MICRO_N_THREADS"; do
+            python3 duckdb/scripts/regression/test_runner.py --old build/base/release/benchmark/benchmark_runner \
+              --new build/pr/release/benchmark/benchmark_runner --benchmarks benchmarks.csv --threads "$threads" \
+              $arguments --disable-timeout --verbose | tee "runner-$threads.log" || status=$?
+          done
+          exit "$status"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: regression-logs-${{ strategy.job-index }}
+          path: runner-*.log
