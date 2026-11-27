@@ -14,23 +14,23 @@ include benchmark/vss/sift1m.benchmark.in
 cache sift1m.duckdb
 
 load
-CREATE TABLE base AS SELECT idx AS id, emb::FLOAT[128] AS emb FROM 'hf://datasets/open-vdb/sift-128-euclidean/train/train-00001-of-00001.parquet';
+CREATE TABLE base AS SELECT idx AS id, emb::FLOAT[128] AS embedding FROM 'hf://datasets/open-vdb/sift-128-euclidean/train/train-00001-of-00001.parquet';
 ATTACH '${BENCHMARK_DIR}/vss_delete_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
 USE vss;
 SET checkpoint_threshold = '10GB';
-CREATE OR REPLACE TABLE t AS FROM sift1m.base WHERE id < ${rows};
-CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);
 
 reload
 ATTACH '${BENCHMARK_DIR}/vss_delete_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
 USE vss;
 SET checkpoint_threshold = '10GB';
-CREATE OR REPLACE TABLE t AS FROM sift1m.base WHERE id < ${rows};
-CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);
 
 run
-DELETE FROM t WHERE id % 2 = 0;
+DELETE FROM vectors WHERE id % 2 = 0;
 
 cleanup
-CREATE OR REPLACE TABLE t AS FROM sift1m.base WHERE id < ${rows};
-CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
+CREATE OR REPLACE TABLE vectors AS FROM sift1m.base WHERE id < ${rows};
+CREATE INDEX vectors_index ON vectors USING DUCKIR_VSS (embedding) WITH (quantization = '${QUANTIZATION}', seed = 0);

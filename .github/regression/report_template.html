@@ -83,7 +83,7 @@ const RANGES = [
 ];
 const rangeOf = change => RANGES.find(range => range.test(change));
 // path: the selected folder, e.g. 'vss/delete'; '' shows everything.
-const state = { threads: null, diff: 'relative', view: 'dots', path: '' };
+const state = { threads: null, diff: 'relative', view: 'bars', path: '' };
 
 const median = values => {
   const sorted = [...values].sort((a, b) => a - b), mid = sorted.length >> 1;

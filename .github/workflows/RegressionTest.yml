@@ -64,16 +64,6 @@ jobs:
               "build/$side/release/repository/duckdb/linux_amd64/"
           done
 
-      # The first run of a benchmark downloads its data into duckdb_benchmark_data/. test_runner.py gives the base and the
-      # PR a data directory each, with links to what this one holds, so they skip the download. The database this run
-      # built is removed, so the base never opens one the PR's extension wrote.
-      - name: Download the data
-        run: |
-          ls ${{ matrix.folder }}/*.benchmark > benchmarks.csv
-          DUCKDB_BENCHMARK_EXTENSION_DIRECTORY="$PWD/build/pr/release/repository/duckdb/linux_amd64" \
-            build/pr/release/benchmark/benchmark_runner --root-dir . "$(head -1 benchmarks.csv)"
-          rm duckdb_benchmark_data/vss_*
-
       # Reads the labels now rather than from the event, so re-running the job after adding the label picks it up.
       - name: Run regression benchmarks
         env:
@@ -81,9 +71,13 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           source .github/settings.env
-          # Without the label, the benchmarks use the default sizes of benchmark/vss/sift1m.benchmark.in.
+          ls ${{ matrix.folder }}/*.benchmark > benchmarks.csv
+          # With the label, the arguments of the folder's suite, e.g. REGRESSION_EXTENDED_ARGUMENTS_VSS for benchmark/vss/create.
           if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' | grep -qx extended-regression-tests; then
-            sizes="--benchmark-argument rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED --benchmark-argument row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE_EXTENDED"
+            suite_arguments="REGRESSION_EXTENDED_ARGUMENTS_$(echo "${{ matrix.folder }}" | cut -d/ -f2 | tr a-z A-Z)"
+            for argument in ${!suite_arguments}; do
+              arguments="$arguments --benchmark-argument $argument"
+            done
           fi
           # Runs the multi-threaded comparison after a failing single-threaded one too, then fails with its exit code.
           set +e -o pipefail
@@ -91,7 +85,7 @@ jobs:
           for threads in 1 "$REGRESSION_MICRO_N_THREADS"; do
             python3 duckdb/scripts/regression/test_runner.py --old build/base/release/benchmark/benchmark_runner \
               --new build/pr/release/benchmark/benchmark_runner --benchmarks benchmarks.csv --threads "$threads" \
-              $sizes --disable-timeout --verbose | tee "runner-$threads.log" || status=$?
+              $arguments --disable-timeout --verbose | tee "runner-$threads.log" || status=$?
           done
           exit "$status"
 

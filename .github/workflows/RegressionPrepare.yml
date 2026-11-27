@@ -1,6 +1,7 @@
 #
-# Builds DuckDB's benchmark runner, with httpfs for the SIFT1M download, for the regression test. Called by the main distribution
-# pipeline in parallel with the extension builds; RegressionTest.yml runs once both are done.
+# Builds DuckDB's benchmark runner, with httpfs for benchmarks that download their data, for the regression test, and
+# lists its benchmark folders. Called by the main distribution pipeline in parallel with the extension builds;
+# RegressionTest.yml runs once both are done.
 #
 name: Regression Prepare
 on:
@@ -18,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_regression: ${{ steps.changes.outputs.run_regression }}
-      folders: ${{ steps.folders.outputs.folders }}
+      folders: ${{ steps.changes.outputs.folders }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -26,7 +27,7 @@ jobs:
 
       # The regression runs when the PR changes code or benchmarks, and pins the same DuckDB as its base: the base's
       # extension does not load into another DuckDB version. A push to main only fills the caches, which every PR reads.
-      - name: Detect changes
+      - name: Detect changes and list the benchmark folders
         id: changes
         env:
           BASE_REF: origin/${{ github.base_ref }}
@@ -40,10 +41,6 @@ jobs:
             echo "run_regression=true" >> "$GITHUB_OUTPUT"
           fi
           echo "duckdb_commit=$(git rev-parse HEAD:duckdb)" >> "$GITHUB_OUTPUT"
-
-      - name: List the benchmark folders
-        id: folders
-        run: |
           source .github/settings.env
           echo "folders=$(find $REGRESSION_BENCHMARK_FOLDERS -name '*.benchmark' -exec dirname {} \; | sort -u | jq -Rsc 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
 
