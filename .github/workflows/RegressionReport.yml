@@ -57,6 +57,6 @@ jobs:
         run: |
           echo "[Regression report]($URL)" >> "$GITHUB_STEP_SUMMARY"
           # neutral: the report informs and never blocks the PR.
-          gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="_Regression Report" -f head_sha="$SHA" -f status=completed \
+          gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="Regression Report" -f head_sha="$SHA" -f status=completed \
             -f conclusion=neutral -f details_url="$URL" -f "output[title]=$(cat description.txt)" \
             -f "output[summary]=[Open the regression report]($URL)"
