@@ -4,6 +4,9 @@
 
 name Sync DUCKIR_VSS ${QUANTIZATION} after insert
 
+# duckir looks up array_distance when it loads, so core_functions has to load first.
+require core_functions
+
 require duckir
 
 include benchmark/vss/sift1m.benchmark.in
