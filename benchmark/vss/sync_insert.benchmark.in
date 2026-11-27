@@ -11,7 +11,7 @@ require parquet
 
 require duckir
 
-include benchmark/vss/config.benchmark.in
+include benchmark/data/config.benchmark.in
 
 load
 ATTACH '${BENCHMARK_DIR}/vss_sync_insert_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});

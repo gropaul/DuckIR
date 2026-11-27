@@ -33,7 +33,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: benchmark/data
-          key: sift1m-${{ hashFiles('benchmark/vss/prepare_sift1m.py', 'benchmark/vss/config.benchmark.in') }}
+          key: sift1m-${{ hashFiles('benchmark/vss/prepare_sift1m.py', '.github/settings.env') }}
           fail-on-cache-miss: true
 
       - name: Download the PR's extension
@@ -74,7 +74,6 @@ jobs:
             --threads 1 \
             --disable-timeout --verbose
 
-      # ubuntu-latest has 4 cores.
       - name: Run regression benchmarks multi-threaded
         if: ${{ !cancelled() }}
         run: |
@@ -82,5 +81,5 @@ jobs:
             --old build/base/release/benchmark/benchmark_runner \
             --new build/pr/release/benchmark/benchmark_runner \
             --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
-            --threads 4 \
+            --threads "$(grep '^REGRESSION_MICRO_N_THREADS=' .github/settings.env | cut -d= -f2)" \
             --disable-timeout --verbose
