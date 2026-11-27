@@ -58,7 +58,7 @@ jobs:
       - name: Build benchmark runner
         if: steps.changes.outputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y ninja-build libssl-dev libcurl4-openssl-dev
+          sudo apt-get update && sudo apt-get install -y ninja-build libssl-dev libcurl4-openssl-dev
           git submodule update --init duckdb
           cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=1 \
             -DDUCKDB_EXTENSION_CONFIGS="$PWD/duckdb/.github/config/extensions/httpfs.cmake" \
