@@ -15,6 +15,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      pull-requests: read
     strategy:
       fail-fast: false
       matrix:
@@ -65,6 +66,25 @@ jobs:
               "build/$side/release/repository/duckdb/linux_amd64/"
           done
 
+      # Reads the labels now rather than from the event, so re-running the job after adding the label picks it up.
+      - name: Pick the size
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -a; source .github/settings.env; set +a
+          if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' | grep -qx extended-regression-tests; then
+            rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE_EXTENDED
+          else
+            rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE
+          fi
+          echo "Running ${rows} rows in row groups of ${row_group_size}"
+          {
+            echo "ROWS=${rows}"
+            echo "ROW_GROUP_SIZE=${row_group_size}"
+            echo "N_THREADS=${REGRESSION_MICRO_N_THREADS}"
+          } >> "$GITHUB_ENV"
+
       - name: Run regression benchmarks single-threaded
         run: |
           python3 duckdb/scripts/regression/test_runner.py \
@@ -72,6 +92,7 @@ jobs:
             --new build/pr/release/benchmark/benchmark_runner \
             --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
             --threads 1 \
+            --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
             --disable-timeout --verbose
 
       - name: Run regression benchmarks multi-threaded
@@ -81,5 +102,6 @@ jobs:
             --old build/base/release/benchmark/benchmark_runner \
             --new build/pr/release/benchmark/benchmark_runner \
             --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
-            --threads "$(grep '^REGRESSION_MICRO_N_THREADS=' .github/settings.env | cut -d= -f2)" \
+            --threads "$N_THREADS" \
+            --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
             --disable-timeout --verbose

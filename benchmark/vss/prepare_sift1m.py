@@ -5,7 +5,7 @@
 # ///
 """Writes the SIFT1M data the benchmark/vss benchmarks read, from ann-benchmarks' sift-128-euclidean.hdf5 (500 MB).
 
-  benchmark/data/sift1m_base.parquet     id, emb: the first REGRESSION_MICRO_VSS_SIFT1M_ROWS (.github/settings.env) base vectors
+  benchmark/data/sift1m_base.parquet     id, emb: the first REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED (.github/settings.env) base vectors
   benchmark/data/sift1m_queries.parquet  qid, vec: the first 1,000 of the 10,000 test vectors
   benchmark/data/config.benchmark.in     the settings the benchmark/vss templates include
 """
@@ -23,7 +23,7 @@ DATA_DIR = os.path.join(os.path.dirname(VSS_DIR), 'data')
 SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(VSS_DIR)), '.github', 'settings.env')
 with open(SETTINGS_PATH) as settings_file:
     SETTINGS = dict(line.strip().split('=', 1) for line in settings_file if line.strip() and not line.startswith('#'))
-ROWS = int(SETTINGS['REGRESSION_MICRO_VSS_SIFT1M_ROWS'])
+ROWS = int(SETTINGS['REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED'])
 QUERIES = 1000
 
 
@@ -40,10 +40,11 @@ if not os.path.exists(hdf5_path):
     subprocess.run(['curl', '-fsSL', '-o', hdf5_path, URL], check=True)
 with h5py.File(hdf5_path, 'r') as f:
     if ROWS > len(f['train']):
-        raise SystemExit(f"REGRESSION_MICRO_VSS_SIFT1M_ROWS = {ROWS} in settings.env, but SIFT1M has only {len(f['train'])} base vectors")
+        raise SystemExit(f"REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED = {ROWS} in settings.env, but SIFT1M has only {len(f['train'])} base vectors")
     write(os.path.join(DATA_DIR, 'sift1m_base.parquet'), 'id', 'emb', f['train'][:ROWS])
     write(os.path.join(DATA_DIR, 'sift1m_queries.parquet'), 'qid', 'vec', f['test'][:QUERIES])
 os.remove(hdf5_path)
 # benchmark_runner lowercases argument names; override one with benchmark_runner --<name> <value>.
 with open(os.path.join(DATA_DIR, 'config.benchmark.in'), 'w') as config:
-    config.write(f"argument rows {ROWS}\nargument row_group_size {SETTINGS['REGRESSION_MICRO_VSS_ROW_GROUP_SIZE']}\n")
+    config.write(f"argument rows {SETTINGS['REGRESSION_MICRO_VSS_SIFT1M_ROWS']}\n"
+                 f"argument row_group_size {SETTINGS['REGRESSION_MICRO_VSS_ROW_GROUP_SIZE']}\n")

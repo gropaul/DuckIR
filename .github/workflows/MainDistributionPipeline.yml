@@ -56,7 +56,8 @@ jobs:
     needs: [duckdb-stable-build-linux-amd64, regression-prepare]
     if: github.event_name == 'pull_request' && needs.regression-prepare.outputs.run_regression == 'true'
     uses: ./.github/workflows/RegressionTest.yml
-    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts.
+    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts and reads the PR's labels.
     permissions:
       actions: read
       contents: read
+      pull-requests: read
