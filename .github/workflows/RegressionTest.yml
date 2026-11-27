@@ -87,21 +87,74 @@ jobs:
 
       - name: Run regression benchmarks single-threaded
         run: |
+          # Collects the samples of a failing comparison too, then fails with its exit code.
+          set +e -o pipefail
           python3 duckdb/scripts/regression/test_runner.py \
             --old build/base/release/benchmark/benchmark_runner \
             --new build/pr/release/benchmark/benchmark_runner \
             --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
             --threads 1 \
             --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
-            --disable-timeout --verbose
+            --disable-timeout --verbose | tee "runner-1.log"
+          status=$?
+          python3 .github/regression/parse_samples.py samples.csv "${{ matrix.benchmark }}" "1" "$ROWS" "$ROW_GROUP_SIZE" \
+            "runner-1.log"
+          exit "$status"
 
       - name: Run regression benchmarks multi-threaded
         if: ${{ !cancelled() }}
         run: |
+          # Collects the samples of a failing comparison too, then fails with its exit code.
+          set +e -o pipefail
           python3 duckdb/scripts/regression/test_runner.py \
             --old build/base/release/benchmark/benchmark_runner \
             --new build/pr/release/benchmark/benchmark_runner \
             --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
             --threads "$N_THREADS" \
             --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
-            --disable-timeout --verbose
+            --disable-timeout --verbose | tee "runner-$N_THREADS.log"
+          status=$?
+          python3 .github/regression/parse_samples.py samples.csv "${{ matrix.benchmark }}" "$N_THREADS" "$ROWS" "$ROW_GROUP_SIZE" \
+            "runner-$N_THREADS.log"
+          exit "$status"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: regression-samples-${{ matrix.benchmark }}
+          path: samples.csv
+
+  # Merges the samples of every regression job into one CSV and an HTML report, both opened from the run's artifacts.
+  report:
+    name: Report
+    needs: regression
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          pattern: regression-samples-*
+          path: samples
+
+      - name: Build the report
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          awk 'FNR > 1 || NR == 1' samples/*/samples.csv > regression-samples.csv
+          python3 .github/regression/build_report.py regression-samples.csv regression-report.html "$PR_URL"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: regression-samples.csv
+          archive: false
+
+      - id: report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: regression-report.html
+          archive: false
+
+      - name: Link the report
+        run: echo "[Regression report](${{ steps.report.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
