@@ -1,5 +1,5 @@
 """Writes the timed runs of test_runner.py --verbose logs to a CSV and inlines that CSV into report_template.html.
-Prints the counts of regressions and improvements, by the LIMIT of the template, for the report's commit status.
+Prints the counts of regressions and improvements, by the LIMIT of the template, as the title of the report's check.
 
 usage: python3 build_report.py <samples.csv> <report.html> <pull request URL> <runner-THREADS.log>...
 """
@@ -12,6 +12,7 @@ samples_path, report_path, pr_url, *log_paths = sys.argv[1:]
 # The logs come from the PR's code, so only names and numbers of the expected shapes reach the HTML.
 GROUP = re.compile(r'::group::raw output: (Base|PR) ([\w/.-]+)$')
 rows = ['benchmark,threads,side,run,seconds']
+runs = {}
 for log_path in log_paths:
     threads = re.search(r'runner-(\d+)\.log$', log_path)[1]
     side = None
@@ -22,6 +23,7 @@ for log_path in log_paths:
             side = None
         elif side and (match := re.fullmatch(re.escape(benchmark) + r'\t(\d+)\t(\d+\.?\d*)', line.rstrip())):
             rows.append(f'{benchmark},{threads},{side},{match[1]},{match[2]}')
+            runs.setdefault((benchmark, threads), {'base': [], 'pr': []})[side].append(float(match[2]))
 samples = '\n'.join(rows) + '\n'
 open(samples_path, 'w').write(samples)
 
@@ -31,9 +33,5 @@ open(report_path, 'w').write(template
                              .replace('/*__PR_URL__*/', pr_url)
                              .replace('/*__PR_NUMBER__*/', pr_url.rstrip('/').rsplit('/', 1)[-1]))
 
-runs = {}
-for row in rows[1:]:
-    benchmark, threads, side, _, seconds = row.split(',')
-    runs.setdefault((benchmark, threads), {'base': [], 'pr': []})[side].append(float(seconds))
 changes = [median(r['pr']) / median(r['base']) - 1 for r in runs.values() if r['base'] and r['pr']]
 print(f'{sum(c >= 0.1 for c in changes)} regressions and {sum(c <= -0.1 for c in changes)} improvements of 10% or more')
