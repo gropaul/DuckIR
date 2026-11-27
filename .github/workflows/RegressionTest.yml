@@ -70,7 +70,8 @@ jobs:
       - name: Download the data
         run: |
           ls ${{ matrix.folder }}/*.benchmark > benchmarks.csv
-          build/pr/release/benchmark/benchmark_runner "$(head -1 benchmarks.csv)"
+          DUCKDB_BENCHMARK_EXTENSION_DIRECTORY="$PWD/build/pr/release/repository/duckdb/linux_amd64" \
+            build/pr/release/benchmark/benchmark_runner --root-dir . "$(head -1 benchmarks.csv)"
           rm duckdb_benchmark_data/vss_*
 
       # Reads the labels now rather than from the event, so re-running the job after adding the label picks it up.
