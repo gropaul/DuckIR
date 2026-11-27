@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: benchmark_runner
-          key: benchmark-runner-httpfs-linux_amd64-${{ steps.changes.outputs.duckdb_commit }}
+          key: benchmark-runner-linux_amd64-${{ steps.changes.outputs.duckdb_commit }}-${{ hashFiles('.github/workflows/RegressionPrepare.yml') }}
 
       - name: Build benchmark runner
         if: steps.changes.outputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
@@ -62,6 +62,7 @@ jobs:
           git submodule update --init duckdb
           cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=1 \
             -DDUCKDB_EXTENSION_CONFIGS="$PWD/duckdb/.github/config/extensions/httpfs.cmake" \
+            -DSTATICALLY_LINK_EXTENSIONS="core_functions;parquet;json;icu;httpfs" \
             -DOVERRIDE_GIT_DESCRIBE="$(git -C duckdb describe --tags)" -S duckdb -B build/runner
           cmake --build build/runner --target benchmark_runner
           cp build/runner/benchmark/benchmark_runner benchmark_runner
