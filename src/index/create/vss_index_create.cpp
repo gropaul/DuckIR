@@ -3,7 +3,6 @@
 #include "duckdb/catalog/catalog_entry/duck_index_entry.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/common/vector/array_vector.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
@@ -76,48 +75,27 @@ unique_ptr<GlobalSinkState> PhysicalCreateVSSIndex::GetGlobalSinkState(ClientCon
 
 class CreateVSSIndexLocalSinkState : public LocalSinkState {
 public:
-	explicit CreateVSSIndexLocalSinkState(const PhysicalCreateVSSIndex &op, ClientContext &context,
-	                                      CreateVSSIndexGlobalSinkState &g_sink) {
-		const auto row_group_size = g_sink.global_index->Cast<VSSIndex>().GetRowGroupSize();
-		row_group_row_ids.resize(row_group_size);
-	}
-
-	// The DuckDB row group whose rows are currently buffered.
-	VSSRowGroupBounds row_group {0, 0};
-	bool row_group_is_closed {false};
-	bool has_row_group {false};
-	// Number of embeddings currently buffered in the row group.
-	idx_t row_group_embeddings_count {0};
-	BufferHandle row_group_embeddings;
-	// Row IDs of the embeddings currently buffered in the row group.
-	std::vector<row_t> row_group_row_ids;
+	// The sink state of the DuckDB row group whose rows are currently buffered, null between row groups.
+	unique_ptr<IndexSinkState> sink_state;
 };
 
 // Builds the buffered row group, then frees its buffer and gives its build slot to the threads waiting for one.
 static void FlushRowGroup(CreateVSSIndexGlobalSinkState &g_sink, CreateVSSIndexLocalSinkState &l_sink,
-                          ClientContext &context) {
-	if (!l_sink.has_row_group) {
+                          DataTable &table) {
+	if (!l_sink.sink_state) {
 		return;
 	}
-	g_sink.global_index->Cast<VSSIndex>().ReserveTableScanMetadata(l_sink.row_group.count);
-	if (l_sink.row_group_embeddings_count > 0) {
-		DuckDBParallelExecutor executor(context, g_sink.default_threads_per_build);
-		g_sink.global_index->Cast<VSSIndex>().SetUpIndexForRowGroup(
-		    l_sink.row_group_row_ids.data(), reinterpret_cast<float *>(l_sink.row_group_embeddings.GetDataMutable()),
-		    l_sink.row_group_embeddings_count, l_sink.row_group.row_start, l_sink.row_group.count,
-		    l_sink.row_group_is_closed, &executor);
-		l_sink.row_group_embeddings_count = 0;
-	}
-	l_sink.row_group_embeddings.Destroy();
-	l_sink.has_row_group = false;
+	auto &vss_index = g_sink.global_index->Cast<VSSIndex>();
+	vss_index.ReserveTableScanMetadata(l_sink.sink_state->input.row_group.count);
+	vss_index.BuildRowGroupIndex(*l_sink.sink_state, table);
+	l_sink.sink_state.reset();
 	annotated_lock_guard<annotated_mutex> guard(g_sink.lock);
 	g_sink.running_builds--;
 	g_sink.UnblockTasks();
 }
 
 unique_ptr<LocalSinkState> PhysicalCreateVSSIndex::GetLocalSinkState(ExecutionContext &context) const {
-	return make_uniq<CreateVSSIndexLocalSinkState>(*this, context.client,
-	                                               sink_state->Cast<CreateVSSIndexGlobalSinkState>());
+	return make_uniq<CreateVSSIndexLocalSinkState>();
 }
 
 SinkResultType PhysicalCreateVSSIndex::Sink(ExecutionContext &context, DataChunk &input_chunk,
@@ -150,13 +128,13 @@ SinkResultType PhysicalCreateVSSIndex::Sink(ExecutionContext &context, DataChunk
 	if (!vss_index.TryGetPhysicalRowGroup(table.GetStorage(), row_id_data[0], row_group)) {
 		throw InternalException("DuckIR VSS: row id %lld is not in any row group of the table", row_id_data[0]);
 	}
-	D_ASSERT(!l_sink.has_row_group || l_sink.row_group.row_start <= row_group.row_start);
+	D_ASSERT(!l_sink.sink_state || l_sink.sink_state->input.row_group.row_start <= row_group.row_start);
 
 	// If we detect a new row group, then finalize the previous row group and prepare to process the new one.
-	if (l_sink.has_row_group && row_group.row_start != l_sink.row_group.row_start) {
-		FlushRowGroup(g_sink, l_sink, context.client);
+	if (l_sink.sink_state && row_group.row_start != l_sink.sink_state->input.row_group.row_start) {
+		FlushRowGroup(g_sink, l_sink, table.GetStorage());
 	}
-	if (!l_sink.has_row_group) {
+	if (!l_sink.sink_state) {
 		// Without a free build slot, DuckDB runs this chunk again once a build gives its slot back.
 		{
 			annotated_lock_guard<annotated_mutex> guard(g_sink.lock);
@@ -165,39 +143,15 @@ SinkResultType PhysicalCreateVSSIndex::Sink(ExecutionContext &context, DataChunk
 			}
 			g_sink.running_builds++;
 		}
-		l_sink.row_group_embeddings =
-		    BufferManager::GetBufferManager(context.client)
-		        .Allocate(MemoryTag::EXTENSION, row_group.count * g_sink.num_dimensions * sizeof(float),
-		                  /*can_destroy=*/false);
-		l_sink.row_group_row_ids.resize(row_group.count);
-		l_sink.row_group = row_group;
-		l_sink.row_group_is_closed = vss_index.IsClosedRowGroup(table.GetStorage(), row_group);
-		l_sink.has_row_group = true;
+		// CREATE INDEX rejects the embeddings it cannot cluster.
+		const IndexSinkInput sink_input(row_group, row_group.count, g_sink.default_threads_per_build,
+		                                UnindexableRowAction::THROW);
+		l_sink.sink_state = vss_index.InitializeIndexSinkState(context.client, sink_input);
 	}
 
 	// Preprocess and accumulate the embeddings into the row group's buffer.
-	D_ASSERT(l_sink.row_group_embeddings_count + num_embeddings <= row_group.count);
-
-	// CREATE INDEX rejects the embeddings it cannot cluster.
-	const auto embeddings = FlatVector::GetDataMutable<float>(ArrayVector::GetChildMutable(embedding_column));
-	for (idx_t i = 0; i < num_embeddings; i++) {
-		if (!IsFiniteEmbedding(embeddings + i * g_sink.num_dimensions, g_sink.num_dimensions)) {
-			throw InvalidInputException(
-			    "DuckIR VSS: the embedding of row %lld has NaN, infinite or too large values, which cannot be indexed",
-			    row_id_data[i]);
-		}
-	}
-	vss_index.PreprocessEmbeddings(embeddings,
-	                               reinterpret_cast<float *>(l_sink.row_group_embeddings.GetDataMutable()) +
-	                                   (l_sink.row_group_embeddings_count * g_sink.num_dimensions),
-	                               num_embeddings);
-
-	memcpy(l_sink.row_group_row_ids.data() + l_sink.row_group_embeddings_count, row_id_data,
-	       num_embeddings * sizeof(row_t));
-
-	l_sink.row_group_embeddings_count += num_embeddings;
-
-	return SinkResultType::NEED_MORE_INPUT;
+	D_ASSERT(l_sink.sink_state->count + num_embeddings <= row_group.count);
+	return vss_index.Sink(*l_sink.sink_state, input_chunk, SelectionVector(), num_embeddings);
 }
 
 SinkCombineResultType PhysicalCreateVSSIndex::Combine(ExecutionContext &context,
@@ -206,7 +160,7 @@ SinkCombineResultType PhysicalCreateVSSIndex::Combine(ExecutionContext &context,
 	auto &g_sink = input.global_state.Cast<CreateVSSIndexGlobalSinkState>();
 
 	// Finalize this thread's last row group.
-	FlushRowGroup(g_sink, l_sink, context.client);
+	FlushRowGroup(g_sink, l_sink, table.GetStorage());
 
 	return SinkCombineResultType::FINISHED;
 }
