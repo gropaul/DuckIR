@@ -16,6 +16,7 @@
 #include <ostream>
 #include <vector>
 
+#include "utils/range.hpp"
 #include "pdx/common.hpp"
 #include "pdx/indexes/flat.hpp"
 #include "pdx/indexes/ivf_tree.hpp"
@@ -185,11 +186,6 @@ public:
 	virtual uint64_t GetSelfManagedMemorySizeInBytes() const = 0;
 };
 
-struct VSSRowGroupBounds {
-	row_t row_start;
-	idx_t count;
-};
-
 struct PDXRowGroup {
 	row_t row_start;
 	row_t row_end;
@@ -337,32 +333,32 @@ public:
 		saq_model = std::move(fit.model);
 	}
 
-	// Builds the index of the row group [row_start, row_start + count) from its (non-NULL) rows. Rows of this row
+	// Builds the index of the row group row_group_range from its (non-NULL) rows. Rows of this row
 	// group that arrive in a later batch are appended to the index that was already built. The build runs on executor
 	// (null: serial). With a reader (duckir_vss_cluster_paging), the index then moves to a temporary chain. Returns how
 	// many bytes the row group's self-managed memory grew by.
 	int64_t SetUpIndexForRowGroup(const row_t *const row_ids, float *const embeddings, const idx_t num_embeddings,
-	                              const row_t row_start, const idx_t count, const bool is_closed,
+	                              const RowRange row_group_range, const bool is_closed,
 	                              PDX::ParallelExecutor *const executor, optional_ptr<VSSBlockChainReader> reader,
 	                              BufferManager &buffer_manager) {
-		D_ASSERT(num_embeddings > 0 && num_embeddings <= count);
+		D_ASSERT(num_embeddings > 0 && num_embeddings <= row_group_range.Size());
 		PDXRowGroup *row_group = nullptr;
 		std::unique_lock<std::mutex> build_lock;
 		{
 			const std::lock_guard<std::mutex> lock(row_groups_mutex);
 			auto it =
-			    std::lower_bound(row_groups.begin(), row_groups.end(), row_start,
+			    std::lower_bound(row_groups.begin(), row_groups.end(), row_group_range.start,
 			                     [](const unique_ptr<PDXRowGroup> &rg, row_t start) { return rg->row_start < start; });
 			// Rare case: If the row group already exists, we will append to it
 			// This happens when parallel scan hands rows of the same rowgroup to more than one task
-			if (it != row_groups.end() && (*it)->row_start == row_start) {
+			if (it != row_groups.end() && (*it)->row_start == row_group_range.start) {
 				row_group = it->get();
 			} else {
 				// Common path:
 				// No rowgroup index exists yet: create one and build the index under its mutex.
 				auto new_row_group = make_uniq<PDXRowGroup>();
-				new_row_group->row_start = row_start;
-				new_row_group->row_end = row_start + static_cast<row_t>(count);
+				new_row_group->row_start = row_group_range.start;
+				new_row_group->row_end = row_group_range.end;
 				new_row_group->is_closed = is_closed;
 				row_group = new_row_group.get();
 				build_lock = std::unique_lock<std::mutex>(row_group->mutex);
@@ -577,27 +573,26 @@ public:
 		return row_groups[row_group_idx]->index->GetNumEmbeddings() == 0;
 	}
 
-	std::vector<VSSRowGroupBounds> FindStaleRowGroups(const std::vector<VSSRowGroupBounds> &physical_row_groups) const {
-		std::vector<VSSRowGroupBounds> stale;
+	std::vector<RowRange> FindStaleRowGroups(const std::vector<RowRange> &physical_row_groups) const {
+		std::vector<RowRange> stale;
 		idx_t mirror_idx = 0;
-		row_t table_end = 0;
+		const row_t table_end = physical_row_groups.empty() ? 0 : physical_row_groups.back().end;
 		// The physical row groups are the ones in the DuckDB table, and the mirror row groups are the ones in the
 		// index.
 		for (const auto &physical : physical_row_groups) {
-			const row_t physical_end = physical.row_start + static_cast<row_t>(physical.count);
-			table_end = physical_end;
 			idx_t overlapping = 0;
 			bool aligned = true;
-			while (mirror_idx < row_groups.size() && row_groups[mirror_idx]->row_start < physical_end) {
+			while (mirror_idx < row_groups.size() && row_groups[mirror_idx]->row_start < physical.end) {
 				const auto &mirror = *row_groups[mirror_idx];
-				if (mirror.row_end > physical.row_start) {
+				const RowRange mirror_rows {mirror.row_start, mirror.row_end};
+				if (mirror_rows.Overlaps(physical)) {
 					overlapping++;
-					aligned = aligned && mirror.row_start == physical.row_start && mirror.row_end <= physical_end;
+					aligned = aligned && mirror_rows.IsPrefixOf(physical);
 				} else {
 					// In a row-id gap before this row group: a checkpoint dropped its row group (all rows deleted).
-					stale.push_back({mirror.row_start, static_cast<idx_t>(mirror.row_end - mirror.row_start)});
+					stale.push_back(mirror_rows);
 				}
-				if (mirror.row_end > physical_end) {
+				if (mirror_rows.EndsAfter(physical.end)) {
 					break; // Also overlaps the next row group, which is then flagged as well.
 				}
 				mirror_idx++;
@@ -609,8 +604,9 @@ public:
 		for (; mirror_idx < row_groups.size(); mirror_idx++) {
 			const auto &mirror = *row_groups[mirror_idx];
 			// Mirroring rowgroups that are beyond the end of the table
-			if (mirror.row_start >= table_end) {
-				stale.push_back({mirror.row_start, static_cast<idx_t>(mirror.row_end - mirror.row_start)});
+			const RowRange mirror_rows {mirror.row_start, mirror.row_end};
+			if (mirror_rows.start >= table_end) {
+				stale.push_back(mirror_rows);
 			}
 		}
 		return stale;
@@ -630,10 +626,10 @@ public:
 		}
 	}
 
-	void RemoveRowGroupsOverlapping(const row_t start, const row_t end) {
+	void RemoveRowGroupsOverlapping(const RowRange range) {
 		const std::lock_guard<std::mutex> lock(row_groups_mutex);
 		const auto overlaps = [&](const unique_ptr<PDXRowGroup> &row_group) {
-			return row_group->row_start < end && row_group->row_end > start;
+			return RowRange {row_group->row_start, row_group->row_end}.Overlaps(range);
 		};
 		// We keep the persisted chains of the removed row groups so that SerializeToDisk can
 		// free them later (via SerializeToDisk -> PersistDirtyRowGroups) when it writes the next snapshot.
@@ -771,12 +767,12 @@ public:
 		}
 	}
 
-	// Compares the mirror of the table's row group [start, end) with the row group's committed `row_ids` (ascending).
+	// Compares the mirror of the table's row group `range` with the row group's committed `row_ids` (ascending).
 	// Deletes the rows the mirror holds that the table no longer has, and passes the runs of rows the mirror does not
 	// hold to `stage` (all of them, without a mirror).
-	void ReconcileRowGroup(const row_t start, const row_t end, const row_t *const row_ids, const idx_t count,
-	                       const std::function<void(row_t, row_t)> &stage) {
-		const auto row_group_idx = LookupRowGroup(start);
+	void ReconcileRowGroup(const RowRange range, const row_t *const row_ids, const idx_t count,
+	                       const std::function<void(RowRange)> &stage) {
+		const auto row_group_idx = LookupRowGroup(range.start);
 		const auto index = row_group_idx.IsValid() ? row_groups[row_group_idx.GetIndex()]->index.get() : nullptr;
 		const auto is_indexed = [&](const row_t row_id) {
 			return index && index->Contains(static_cast<size_t>(row_id));
@@ -784,7 +780,7 @@ public:
 		bool in_missing_run = false;
 		row_t missing_run_start = 0;
 		idx_t next = 0;
-		for (row_t row_id = start; row_id < end; row_id++) {
+		for (row_t row_id = range.start; row_id < range.end; row_id++) {
 			const bool in_table = next < count && row_ids[next] == row_id;
 			if (in_table) {
 				next++;
@@ -799,11 +795,11 @@ public:
 				missing_run_start = row_id;
 			} else if (!missing && in_missing_run) {
 				in_missing_run = false;
-				stage(missing_run_start, row_id);
+				stage({missing_run_start, row_id});
 			}
 		}
 		if (in_missing_run) {
-			stage(missing_run_start, end);
+			stage({missing_run_start, range.end});
 		}
 	}
 

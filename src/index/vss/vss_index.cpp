@@ -4,12 +4,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-#include "duckdb/storage/table/row_group_collection.hpp"
-#include "duckdb/storage/table/row_group_segment_tree.hpp"
-#include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table_io_manager.hpp"
-#include "duckdb/transaction/duck_transaction_manager.hpp"
-#include "duckdb/transaction/transaction_data.hpp"
 #include "pdx/common.hpp"
 #include "pdx/utils.hpp"
 #include "index/vss/vss_index.hpp"
@@ -28,8 +23,8 @@ VSSIndex::VSSIndex(const Identifier &name, IndexConstraintType index_constraint_
                    const vector<unique_ptr<Expression>> &unbound_expressions, AttachedDatabase &db,
                    const case_insensitive_map_t<Value> &index_creation_options,
                    const IndexStorageInfo &persistence_info)
-    : BoundIndex(name, TYPE_NAME, index_constraint_type, column_ids, table_io_manager, unbound_expressions, db),
-      memory_allocator(BufferAllocator::Get(db.GetDatabase())), buffer_manager(BufferManager::GetBufferManager(db)) {
+    : RGPartitionedIndex(name, TYPE_NAME, index_constraint_type, column_ids, table_io_manager, unbound_expressions, db),
+      memory_allocator(BufferAllocator::Get(db.GetDatabase())) {
 	if (index_constraint_type != IndexConstraintType::NONE) {
 		throw NotImplementedException("DuckIR VSS indexes do not support unique or primary key constraints");
 	}
@@ -137,7 +132,7 @@ VSSIndex::VSSIndex(const Identifier &name, IndexConstraintType index_constraint_
 	// loads, below.
 	if (!persistence_info.IsValid()) {
 		vss_wrapper->CreatePruner();
-		UpdateReservedMemory(static_cast<int64_t>(vss_wrapper->GetSelfManagedMemorySizeInBytes()));
+		UpdateReservedMemory(static_cast<int64_t>(GetSelfManagedMemorySizeInBytes()));
 	}
 	Value cluster_paging_setting;
 	db.GetDatabase().TryGetCurrentSetting("duckir_vss_cluster_paging", cluster_paging_setting);
@@ -159,7 +154,7 @@ VSSIndex::VSSIndex(const Identifier &name, IndexConstraintType index_constraint_
 	if (persistence_info.IsValid() && !bind_error.HasError()) {
 		try {
 			vss_wrapper->CreatePruner();
-			UpdateReservedMemory(static_cast<int64_t>(vss_wrapper->GetSelfManagedMemorySizeInBytes()));
+			UpdateReservedMemory(static_cast<int64_t>(GetSelfManagedMemorySizeInBytes()));
 			LoadRowGroups(*storage_reader, directory, cluster_paging);
 			persisted_row_end = directory.row_groups.empty() ? 0 : directory.row_groups.back().row_end;
 			// If first_reused_row_id is among the persisted options, a row id was reused. The reconcile must rebuild
@@ -167,7 +162,7 @@ VSSIndex::VSSIndex(const Identifier &name, IndexConstraintType index_constraint_
 			const auto first_reused = persistence_info.options.find("first_reused_row_id");
 			if (first_reused != persistence_info.options.end()) {
 				first_reused_row_id = first_reused->second.GetValue<row_t>();
-				RemoveRowGroupsOverlapping(first_reused_row_id, NumericLimits<row_t>::Maximum());
+				RemoveRowGroupsOverlapping({first_reused_row_id, NumericLimits<row_t>::Maximum()});
 			}
 			needs_reconciliation = true;
 		} catch (std::exception &ex) {
@@ -178,9 +173,7 @@ VSSIndex::VSSIndex(const Identifier &name, IndexConstraintType index_constraint_
 	function_matcher = MakeFunctionMatcher(*vss_wrapper.get());
 }
 
-// Indexes are destroyed before DuckDB's buffer manager (DatabaseInstance::~DatabaseInstance).
 VSSIndex::~VSSIndex() {
-	UpdateReservedMemory(-static_cast<int64_t>(reserved_memory_bytes.load()));
 	buffer_manager.FreeReservedMemory(table_scan_reserved_bytes.load());
 }
 
@@ -190,16 +183,6 @@ void VSSIndex::ReserveTableScanMetadata(const idx_t num_rows) {
 	const idx_t bytes = (column_bytes + block_size - 1) / block_size * DUCKDB_TABLE_SCAN_METADATA_BYTES_PER_BLOCK;
 	buffer_manager.ReserveMemory(bytes);
 	table_scan_reserved_bytes += bytes;
-}
-
-void VSSIndex::UpdateReservedMemory(const int64_t delta) {
-	if (delta > 0) {
-		buffer_manager.ReserveMemory(static_cast<idx_t>(delta));
-		reserved_memory_bytes += static_cast<idx_t>(delta);
-	} else if (delta < 0) {
-		buffer_manager.FreeReservedMemory(static_cast<idx_t>(-delta));
-		reserved_memory_bytes -= static_cast<idx_t>(-delta);
-	}
 }
 
 /******************************************************************
@@ -223,47 +206,6 @@ unique_ptr<StorageLockKey> VSSIndex::SyncAndLockForSearch(ClientContext &context
 	return rwlock.GetSharedLock();
 }
 
-idx_t VSSIndex::GetRowGroupSize() const {
-	return table_io_manager.GetRowGroupSize();
-}
-
-bool VSSIndex::TryGetPhysicalRowGroup(DataTable &table, const row_t row_id, VSSRowGroupBounds &result) const {
-	auto row_groups = table.GetRowGroupCollection()->GetRowGroups();
-	auto lock = row_groups->Lock();
-	idx_t segment_index;
-	if (!row_groups->TryGetSegmentIndex(lock, static_cast<idx_t>(row_id), segment_index)) {
-		return false;
-	}
-	auto node = row_groups->GetSegmentByIndex(lock, static_cast<int64_t>(segment_index));
-	result = {static_cast<row_t>(node->GetRowStart()), node->GetCount()};
-	return true;
-}
-
-bool VSSIndex::IsClosedRowGroup(DataTable &table, const VSSRowGroupBounds &row_group) const {
-	VSSRowGroupBounds next_row_group;
-	return row_group.count >= GetRowGroupSize() ||
-	       TryGetPhysicalRowGroup(table, row_group.row_start + static_cast<row_t>(row_group.count), next_row_group);
-}
-
-vector<VSSRowGroupBounds> VSSIndex::GetPhysicalRowGroups(DataTable &table) const {
-	vector<VSSRowGroupBounds> result;
-	auto row_groups = table.GetRowGroupCollection()->GetRowGroups();
-	auto lock = row_groups->Lock();
-	for (auto node = row_groups->GetRootSegment(lock); node; node = row_groups->GetNextSegment(lock, *node)) {
-		result.push_back({static_cast<row_t>(node->GetRowStart()), node->GetCount()});
-	}
-	return result;
-}
-
-idx_t VSSIndex::GetLargestRowGroupCount(DataTable &table) const {
-	// At least the attach's row group size, which an open row group can still grow to.
-	idx_t largest = GetRowGroupSize();
-	for (const auto &row_group : GetPhysicalRowGroups(table)) {
-		largest = MaxValue(largest, row_group.count);
-	}
-	return largest;
-}
-
 optional_idx VSSIndex::LookupRowGroup(const row_t row_id) const {
 	return DispatchWrapper([&](auto &wrapper) { return wrapper.LookupRowGroup(row_id); });
 }
@@ -272,10 +214,10 @@ bool VSSIndex::IsEmptyRowGroup(const idx_t row_group_idx) const {
 	return DispatchWrapper([&](auto &wrapper) { return wrapper.IsEmptyRowGroup(row_group_idx); });
 }
 
-VSSRowRange VSSIndex::GetRowGroupRange(const idx_t row_group_idx) const {
+RowRange VSSIndex::GetRowGroupRange(const idx_t row_group_idx) const {
 	return DispatchWrapper([&](auto &wrapper) {
 		const auto &row_group = wrapper.GetRowGroup(row_group_idx);
-		return VSSRowRange {row_group.row_start, row_group.row_end};
+		return RowRange {row_group.row_start, row_group.row_end};
 	});
 }
 
@@ -291,24 +233,24 @@ void VSSIndex::DeleteRow(const row_t row_id) {
 	DispatchWrapper([&](auto &wrapper) { wrapper.DeleteRow(row_id); });
 }
 
-vector<VSSRowGroupBounds> VSSIndex::FindStaleRowGroups(DataTable &table) const {
-	const auto physical_row_groups = GetPhysicalRowGroups(table);
+vector<RowRange> VSSIndex::FindStaleRowGroups(DataTable &table) const {
+	const auto physical_row_groups = GetPhysicalRowGroupRanges(table);
 	return DispatchWrapper([&](auto &wrapper) { return wrapper.FindStaleRowGroups(physical_row_groups); });
 }
 
 void VSSIndex::MarkClosedRowGroups(DataTable &table) {
 	const auto is_closed = [&](const row_t row_start) {
-		VSSRowGroupBounds row_group;
-		return TryGetPhysicalRowGroup(table, row_start, row_group) && IsClosedRowGroup(table, row_group);
+		const auto row_group_range = GetPhysicalRowGroupRange(table, row_start);
+		return !row_group_range.IsEmpty() && IsClosedRowGroup(table, row_group_range);
 	};
 	DispatchWrapper([&](auto &wrapper) { wrapper.MarkClosedRowGroups(is_closed); });
 }
 
-void VSSIndex::RemoveRowGroupsOverlapping(const row_t start, const row_t end) {
-	DispatchWrapper([&](auto &wrapper) { wrapper.RemoveRowGroupsOverlapping(start, end); });
+void VSSIndex::RemoveRowGroupsOverlapping(const RowRange range) {
+	DispatchWrapper([&](auto &wrapper) { wrapper.RemoveRowGroupsOverlapping(range); });
 }
 
-void VSSIndex::DeleteStaleRowIds(const std::vector<VSSRowRange> &ranges) {
+void VSSIndex::DeleteStaleRowIds(const std::vector<RowRange> &ranges) {
 	DispatchWrapper([&](auto &wrapper) {
 		for (const auto &range : ranges) {
 			wrapper.DeleteStaleRowIds(range.start, range.end);
@@ -316,106 +258,11 @@ void VSSIndex::DeleteStaleRowIds(const std::vector<VSSRowRange> &ranges) {
 	});
 }
 
-// todo@gropaul: Move to RGPartitionedIndex
-// Scans every committed row, whatever the calling transaction's snapshot. The mirror
-// holds the committed state, and rows a query must not see are dropped when it fetches its results.
-TransactionData VSSIndex::GetCommittedSnapshot(const bool all_committed) const {
-	return TransactionData(MAX_TRANSACTION_ID,
-	                       all_committed ? VisibilityBound::AllCommitted()
-	                                     : VisibilityBound::Through(DuckTransactionManager::Get(db).GetLastCommit()));
-}
-
-// todo@gropaul: Move to RGPartitionedIndex
-vector<StorageIndex> VSSIndex::GetScanColumnIds() const {
-	return {StorageIndex(GetColumnIds()[0]), StorageIndex()};
-}
-
-// todo@gropaul: Move to RGPartitionedIndex
-vector<LogicalType> VSSIndex::GetScanTypes() const {
-	return {logical_types[0], LogicalType::ROW_TYPE};
-}
-
-TableRangeScanner::TableRangeScanner(DataTable &table, Allocator &allocator, vector<StorageIndex> column_ids_p,
-                                     const vector<LogicalType> &types, const TransactionData &transaction,
-                                     const std::vector<VSSRowRange> &row_id_ranges)
-    : rows_returned(row_id_ranges.size(), 0), table(table), scan_options(transaction),
-      column_ids(std::move(column_ids_p)), row_id_ranges(row_id_ranges) {
-	chunk.Initialize(allocator, types);
-}
-
-bool TableRangeScanner::Next() {
-	const auto &ranges = row_id_ranges;
-	while (true) {
-		if (!table_scan_state) {
-			while (current_ranges.start < ranges.size() && ranges[current_ranges.start].IsEmpty()) {
-				current_ranges.start++;
-			}
-			if (current_ranges.start >= ranges.size()) {
-				return false;
-			}
-			// Ranges less than a vector apart share one scan: the scan of each would read that vector anyway.
-			current_ranges.end = current_ranges.start + 1;
-			while (current_ranges.end < ranges.size() &&
-			       ranges[current_ranges.end].start - ranges[current_ranges.end - 1].end <
-			           static_cast<row_t>(STANDARD_VECTOR_SIZE)) {
-				current_ranges.end++;
-			}
-			table_scan_state = make_uniq<TableScanState>();
-			table_scan_state->Initialize(column_ids);
-			table.GetRowGroupCollection()->InitializeScanWithOffset(
-			    QueryContext(), table_scan_state->table_state, column_ids,
-			    static_cast<idx_t>(ranges[current_ranges.start].start),
-			    static_cast<idx_t>(ranges[current_ranges.end - 1].end));
-		}
-		chunk.Reset();
-		// Deleted rows are gone, NULL values are NULL.
-		table_scan_state->table_state.Scan(scan_options, chunk);
-		if (chunk.size() == 0) {
-			table_scan_state.reset();
-			current_ranges.start = current_ranges.end;
-			continue;
-		}
-		// The row ids are the last column. The index flattens the other columns if it needs to.
-		auto &row_id_column = chunk.data[chunk.ColumnCount() - 1];
-		row_id_column.Flatten();
-		const auto scanned_row_ids = FlatVector::GetData<row_t>(row_id_column);
-		const idx_t chunk_size = chunk.size();
-		// Row ids ascend: a chunk whose first and last row are in the current range needs no selection.
-		const auto &range = ranges[current_ranges.start];
-		if (range.Contains(scanned_row_ids[0]) && range.Contains(scanned_row_ids[chunk_size - 1])) {
-			rows_returned[current_ranges.start] += chunk_size;
-			sel.Initialize(nullptr, 0);
-			sel_count = chunk_size;
-			return true;
-		}
-		if (!sel.IsSet()) {
-			sel.Initialize(STANDARD_VECTOR_SIZE);
-		}
-		sel_count = 0;
-		for (idx_t i = 0; i < chunk_size; i++) {
-			// The scan starts at the vector that holds the first range's start, and reads the gaps between ranges.
-			while (current_ranges.start + 1 < current_ranges.end &&
-			       ranges[current_ranges.start].end <= scanned_row_ids[i]) {
-				current_ranges.start++;
-			}
-			if (!ranges[current_ranges.start].Contains(scanned_row_ids[i])) {
-				continue;
-			}
-			rows_returned[current_ranges.start]++;
-			sel.set_index(sel_count++, i);
-		}
-		if (sel_count > 0) {
-			return true;
-		}
-	}
-}
-
 template <bool HAS_SEL>
 static idx_t GetOptionalIndex(const SelectionVector &sel, const idx_t idx) {
 	return HAS_SEL ? sel.get_index_unsafe(idx) : idx;
 }
 
-// todo@gropaul: the NULL part moves to RGPartitionedIndex
 // Selects the valid, finite rows of `sel` into indexable_sel, up to max_rows. Throws on a non-finite one if asked.
 template <bool HAS_SEL>
 static idx_t SelectIndexableRows(VSSIndexSinkState &state, Vector &embedding_column, const row_t *scanned_row_ids,
@@ -533,59 +380,24 @@ VSSIndexSinkState::VSSIndexSinkState(ClientContext &context, const IndexSinkInpu
       executor(make_uniq<DuckDBParallelExecutor>(context, input.num_threads)), max_rows(max_rows) {
 }
 
-// todo@gropaul: Move to RGPartitionedIndex
-void VSSIndex::ScanAndSinkRows(DataTable &table, const std::vector<VSSRowRange> &ranges, IndexSinkState &sink_state,
-                               std::vector<idx_t> &rows_returned, const bool all_committed) {
-	TableRangeScanner scanner(table, Allocator::Get(db), GetScanColumnIds(), GetScanTypes(),
-	                          GetCommittedSnapshot(all_committed), ranges);
-	while (scanner.Next()) {
-		// A sink can decide to stop, for example, if it only needs a sample of rows.
-		const auto sink_result = Sink(sink_state, scanner.chunk, scanner.sel, scanner.sel_count);
-		if (sink_result == SinkResultType::FINISHED) {
-			break;
-		}
-	}
-	rows_returned = std::move(scanner.rows_returned);
-}
-
-idx_t VSSIndex::FetchCommittedRowIds(DataTable &table, const row_t start, const row_t end, row_t *const row_ids) {
-	const auto committed = GetCommittedSnapshot();
-	const std::vector<VSSRowRange> ranges {{start, end}};
-	TableRangeScanner scanner(table, Allocator::Get(db), {StorageIndex()}, {LogicalType::ROW_TYPE}, committed, ranges);
-	idx_t count = 0;
-	while (scanner.Next()) {
-		const auto scanned_row_ids = FlatVector::GetData<row_t>(scanner.chunk.data[0]);
-		if (!scanner.sel.IsSet()) {
-			memcpy(row_ids + count, scanned_row_ids, scanner.sel_count * sizeof(row_t));
-			count += scanner.sel_count;
-			continue;
-		}
-		for (idx_t sel_idx = 0; sel_idx < scanner.sel_count; sel_idx++) {
-			row_ids[count++] = scanned_row_ids[scanner.sel.get_index(sel_idx)];
-		}
-	}
-	return count;
-}
-
 // One DuckDB row group of row ids at a time
 void VSSIndex::ReconcileWithTable(DataTable &table) {
 	auto row_ids = make_uniq_array<row_t>(GetLargestRowGroupCount(table));
-	const auto stage = [&](const row_t start, const row_t end) {
-		StageUnindexedRange(unindexed_row_ranges, {start, end});
+	const auto stage = [&](const RowRange range) {
+		StageUnindexedRange(unindexed_row_ranges, range);
 	};
-	for (const auto &physical : GetPhysicalRowGroups(table)) {
-		if (physical.count == 0) {
+	for (const auto &physical : GetPhysicalRowGroupRanges(table)) {
+		if (physical.IsEmpty()) {
 			continue;
 		}
-		const row_t end = physical.row_start + static_cast<row_t>(physical.count);
-		const idx_t count = FetchCommittedRowIds(table, physical.row_start, end, row_ids.get());
-		ReconcileRowGroup(physical.row_start, end, row_ids.get(), count, stage);
+		const idx_t count = FetchCommittedRowIds(table, physical, row_ids.get());
+		ReconcileRowGroup(physical, row_ids.get(), count, stage);
 	}
 }
 
-void VSSIndex::ReconcileRowGroup(const row_t start, const row_t end, const row_t *const row_ids, const idx_t count,
-                                 const std::function<void(row_t, row_t)> &stage) {
-	DispatchWrapper([&](auto &wrapper) { wrapper.ReconcileRowGroup(start, end, row_ids, count, stage); });
+void VSSIndex::ReconcileRowGroup(const RowRange range, const row_t *const row_ids, const idx_t count,
+                                 const std::function<void(RowRange)> &stage) {
+	DispatchWrapper([&](auto &wrapper) { wrapper.ReconcileRowGroup(range, row_ids, count, stage); });
 }
 
 void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
@@ -606,24 +418,23 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 	// Row groups a checkpoint merged or dropped: their mirrors go, and the ones still in the table are rebuilt.
 	std::vector<idx_t> rows_returned;
 	for (const auto &stale : FindStaleRowGroups(table)) {
-		RemoveRowGroupsOverlapping(stale.row_start, stale.row_start + static_cast<row_t>(stale.count));
-		VSSRowGroupBounds bounds;
-		if (!TryGetPhysicalRowGroup(table, stale.row_start, bounds)) {
+		RemoveRowGroupsOverlapping(stale);
+		const auto bounds = GetPhysicalRowGroupRange(table, stale.start);
+		if (bounds.IsEmpty()) {
 			continue;
 		}
-		const row_t bounds_end = bounds.row_start + static_cast<row_t>(bounds.count);
 		try {
-			const IndexSinkInput sink_input(bounds, bounds.count, num_threads);
+			const IndexSinkInput sink_input(bounds, bounds.Size(), num_threads);
 			auto sink_state = InitializeIndexSinkState(context, sink_input);
 			// As of every commit: a DELETE in flight already removed some of these rows from the index. The rows of an
 			// INSERT in flight it brings are in the inbox, whose ids DeleteStaleRowIds evicts later in this sync.
-			ScanAndSinkRows(table, {{bounds.row_start, bounds_end}}, *sink_state, rows_returned,
+			ScanAndSinkRows(table, {bounds}, *sink_state, rows_returned,
 			                /*all_committed=*/true);
 			BuildRowGroupIndex(*sink_state, table);
 		} catch (...) {
 			// A failed rebuild leaves no mirror, and its rows staged: the next sync builds them.
-			RemoveRowGroupsOverlapping(bounds.row_start, bounds_end);
-			StageUnindexedRange(unindexed_row_ranges, {bounds.row_start, bounds_end});
+			RemoveRowGroupsOverlapping(bounds);
+			StageUnindexedRange(unindexed_row_ranges, bounds);
 			has_unindexed_rows = true;
 			throw;
 		}
@@ -644,7 +455,7 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 	// published commit, where a row deleted by a commit in flight is still there, and the new row of a reused row id is
 	// in the inbox's ranges.
 	{
-		std::vector<VSSRowRange> committed_ranges;
+		std::vector<RowRange> committed_ranges;
 		std::vector<row_t> committed_deletes;
 		{
 			const lock_guard<mutex> staging(commit_staging_lock);
@@ -662,26 +473,25 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 
 	// Unindexed rows, gathered per DuckDB row group: a row group without a mirror is clustered once from all of its
 	// rows. Each range is retired on its own because rows of one commit become visible together.
-	std::vector<VSSRowRange> still_unindexed;
+	std::vector<RowRange> still_unindexed;
 	idx_t range_idx = 0;
 	while (range_idx < unindexed_row_ranges.size()) {
-		VSSRowGroupBounds bounds;
-		if (!TryGetPhysicalRowGroup(table, unindexed_row_ranges[range_idx].start, bounds)) {
+		const auto bounds = GetPhysicalRowGroupRange(table, unindexed_row_ranges[range_idx].start);
+		if (bounds.IsEmpty()) {
 			// The rows are not in the table yet: their commit is still in flight.
 			still_unindexed.push_back(unindexed_row_ranges[range_idx++]);
 			continue;
 		}
-		const row_t bounds_end = bounds.row_start + static_cast<row_t>(bounds.count);
 		idx_t num_unindexed_rows = 0;
-		for (idx_t i = range_idx; i < unindexed_row_ranges.size() && unindexed_row_ranges[i].start < bounds_end; i++) {
+		for (idx_t i = range_idx; i < unindexed_row_ranges.size() && unindexed_row_ranges[i].start < bounds.end; i++) {
 			const auto &range = unindexed_row_ranges[i];
-			num_unindexed_rows += static_cast<idx_t>(MinValue<row_t>(range.end, bounds_end) - range.start);
+			num_unindexed_rows += static_cast<idx_t>(MinValue<row_t>(range.end, bounds.end) - range.start);
 		}
-		auto row_group_idx = LookupRowGroup(bounds.row_start);
-		std::vector<VSSRowRange> row_group_ranges;
-		for (idx_t i = range_idx; i < unindexed_row_ranges.size() && unindexed_row_ranges[i].start < bounds_end; i++) {
+		auto row_group_idx = LookupRowGroup(bounds.start);
+		std::vector<RowRange> row_group_ranges;
+		for (idx_t i = range_idx; i < unindexed_row_ranges.size() && unindexed_row_ranges[i].start < bounds.end; i++) {
 			row_group_ranges.push_back(
-			    {unindexed_row_ranges[i].start, MinValue<row_t>(unindexed_row_ranges[i].end, bounds_end)});
+			    {unindexed_row_ranges[i].start, MinValue<row_t>(unindexed_row_ranges[i].end, bounds.end)});
 		}
 		try {
 			const IndexSinkInput sink_input(bounds, num_unindexed_rows, num_threads);
@@ -695,10 +505,10 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 					still_unindexed.push_back(row_group_ranges[i]);
 				}
 			}
-			while (range_idx < unindexed_row_ranges.size() && unindexed_row_ranges[range_idx].start < bounds_end) {
+			while (range_idx < unindexed_row_ranges.size() && unindexed_row_ranges[range_idx].start < bounds.end) {
 				// A range that continues past this row group goes on in the next one
-				if (unindexed_row_ranges[range_idx].end > bounds_end) {
-					unindexed_row_ranges[range_idx].start = bounds_end;
+				if (unindexed_row_ranges[range_idx].end > bounds.end) {
+					unindexed_row_ranges[range_idx].start = bounds.end;
 					break;
 				}
 				range_idx++;
@@ -709,7 +519,7 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 			// Every row of this mirror was deleted from our index:
 			// we remove the mirror and rebuild it from the new rows
 			if (row_group_idx.IsValid() && IsEmptyRowGroup(row_group_idx.GetIndex())) {
-				RemoveRowGroupsOverlapping(bounds.row_start, bounds_end);
+				RemoveRowGroupsOverlapping(bounds);
 				row_group_idx = optional_idx();
 			}
 			// The scanned rows are appended to the mirror if it exists. Otherwise, the scanned rows build a new mirror.
@@ -723,7 +533,7 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 			// skipped) or builds them. A failed build leaves no mirror. A merge before the append that ran out of
 			// memory can have dropped rows of the mirror: the next sync reconciles them back.
 			if (!row_group_idx.IsValid()) {
-				RemoveRowGroupsOverlapping(bounds.row_start, bounds_end);
+				RemoveRowGroupsOverlapping(bounds);
 			} else {
 				needs_reconciliation = true;
 			}
@@ -748,8 +558,12 @@ void VSSIndex::SyncWithTable(ClientContext &context, DataTable &table) {
 
 	// After a sync, the self-managed size of the index can differ from the reserved memory. Reserving the difference
 	// makes the two equal again. A negative difference frees memory that the index no longer uses.
-	const auto self_managed_bytes = static_cast<int64_t>(vss_wrapper->GetSelfManagedMemorySizeInBytes());
+	const auto self_managed_bytes = static_cast<int64_t>(GetSelfManagedMemorySizeInBytes());
 	UpdateReservedMemory(self_managed_bytes - static_cast<int64_t>(reserved_memory_bytes.load()));
+}
+
+uint64_t VSSIndex::GetSelfManagedMemorySizeInBytes() const {
+	return vss_wrapper->GetSelfManagedMemorySizeInBytes();
 }
 
 void VSSIndex::FinishSync() {
@@ -761,7 +575,7 @@ void VSSIndex::FinishSync() {
 
 unique_ptr<IndexSinkState> VSSIndex::InitializeIndexSinkState(ClientContext &context,
                                                               const IndexSinkInput &sink_input) {
-	D_ASSERT(sink_input.num_rows <= sink_input.row_group.count);
+	D_ASSERT(sink_input.num_rows <= sink_input.row_group_range.Size());
 	// One DuckDB row group of transformed embeddings at a time, in a DuckDB buffer of the rows fetched.
 	const auto num_dimensions = GetNumDimensions();
 	auto embeddings_buffer =
@@ -780,8 +594,8 @@ void VSSIndex::BuildRowGroupIndex(IndexSinkState &sink_state, DataTable &table) 
 		return;
 	}
 	const auto &input = state.input;
-	SetUpIndexForRowGroup(state.row_ids.get(), state.embeddings, state.count, input.row_group.row_start,
-	                      input.row_group.count, IsClosedRowGroup(table, input.row_group), state.executor.get());
+	SetUpIndexForRowGroup(state.row_ids.get(), state.embeddings, state.count, input.row_group_range,
+	                      IsClosedRowGroup(table, input.row_group_range), state.executor.get());
 }
 
 void VSSIndex::AppendToRowGroupIndex(IndexSinkState &sink_state, const idx_t row_group_idx) {
@@ -799,12 +613,12 @@ void VSSIndex::FitSAQModelForCreate(ClientContext &context, DataTable &table) {
 		return;
 	}
 	// The first non-NULL rows of every row group, SAQ_FIT_SAMPLE_SIZE in all.
-	const auto physical_row_groups = GetPhysicalRowGroups(table);
+	const auto physical_row_groups = GetPhysicalRowGroupRanges(table);
 	const idx_t rows_per_row_group =
 	    (PDX::SAQ_FIT_SAMPLE_SIZE + physical_row_groups.size() - 1) / physical_row_groups.size();
 	idx_t max_sampled = 0;
-	for (const auto &row_group : physical_row_groups) {
-		max_sampled += MinValue<idx_t>(row_group.count, rows_per_row_group);
+	for (const auto &row_group_range : physical_row_groups) {
+		max_sampled += MinValue<idx_t>(row_group_range.Size(), rows_per_row_group);
 	}
 	const auto num_dimensions = GetNumDimensions();
 	auto sample = skmeans::AllocateBuffer<float>(memory_allocator, max_sampled * num_dimensions);
@@ -812,14 +626,13 @@ void VSSIndex::FitSAQModelForCreate(ClientContext &context, DataTable &table) {
 	                                static_cast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
 	idx_t num_sampled = 0;
 	std::vector<idx_t> rows_returned;
-	for (const auto &row_group : physical_row_groups) {
-		const row_t end = row_group.row_start + static_cast<row_t>(row_group.count);
-		const IndexSinkInput sink_input(row_group, MinValue<idx_t>(row_group.count, rows_per_row_group),
+	for (const auto &row_group_range : physical_row_groups) {
+		const IndexSinkInput sink_input(row_group_range, MinValue<idx_t>(row_group_range.Size(), rows_per_row_group),
 		                                executor.NumWorkers());
 		// The identity rotation of an index not fitted yet leaves the rows as they are.
 		VSSIndexSinkState sink_state(context, sink_input, sample.get() + num_sampled * num_dimensions,
 		                             /*rotate=*/false, sink_input.num_rows);
-		ScanAndSinkRows(table, {{row_group.row_start, end}}, sink_state, rows_returned);
+		ScanAndSinkRows(table, {row_group_range}, sink_state, rows_returned);
 		num_sampled += sink_state.count;
 	}
 	if (num_sampled == 0) {
@@ -831,12 +644,12 @@ void VSSIndex::FitSAQModelForCreate(ClientContext &context, DataTable &table) {
 // Called by CREATE INDEX's threads in parallel: each reserves the self-managed memory its row group grew by. PDX's
 // buffers are charged as it allocates them.
 void VSSIndex::SetUpIndexForRowGroup(const row_t *const row_ids, float *const vectors, const idx_t num_vectors,
-                                     const row_t row_start, const idx_t count, const bool is_closed,
+                                     const RowRange row_group_range, const bool is_closed,
                                      PDX::ParallelExecutor *const executor) {
 	// Without paging, the row groups stay in memory.
 	const auto reader = cluster_paging ? storage_reader.get() : nullptr;
 	const int64_t self_managed_growth_bytes = DispatchWrapper([&](auto &wrapper) {
-		return wrapper.SetUpIndexForRowGroup(row_ids, vectors, num_vectors, row_start, count, is_closed, executor,
+		return wrapper.SetUpIndexForRowGroup(row_ids, vectors, num_vectors, row_group_range, is_closed, executor,
 		                                     reader, buffer_manager);
 	});
 	UpdateReservedMemory(self_managed_growth_bytes);
@@ -899,7 +712,7 @@ ErrorData VSSIndex::Insert(IndexLock &lock, DataChunk &data, Vector &row_ids) {
 	try {
 		row_ids.Flatten();
 		const auto row_id_data = FlatVector::GetData<row_t>(row_ids);
-		const auto stage = [&](const VSSRowRange &staged) {
+		const auto stage = [&](const RowRange &staged) {
 			StageUnindexedRange(staged_row_ranges, staged);
 			// Appends land past the persisted row groups: a row id below persisted_row_end was reused.
 			if (staged.start < persisted_row_end) {
@@ -908,14 +721,14 @@ ErrorData VSSIndex::Insert(IndexLock &lock, DataChunk &data, Vector &row_ids) {
 		};
 		// Determine consecutive ranges of row ids.
 		// For example: `1, 2, 3, 5, 6 --> [1, 3] + [5, 6]`
-		VSSRowRange range {row_id_data[0], row_id_data[0] + 1};
+		auto range = RowRange::FromStartAndSize(row_id_data[0], 1);
 		for (idx_t i = 1; i < count; i++) {
 			if (row_id_data[i] == range.end) {
 				range.end++;
 				continue;
 			}
 			stage(range);
-			range = {row_id_data[i], row_id_data[i] + 1};
+			range = RowRange::FromStartAndSize(row_id_data[i], 1);
 		}
 		stage(range);
 		has_unindexed_rows = true;
@@ -960,10 +773,10 @@ void VSSIndex::Delete(IndexLock &lock, DataChunk &entries, Vector &row_ids) {
 	}
 }
 
-void VSSIndex::StageUnindexedRange(std::vector<VSSRowRange> &ranges, const VSSRowRange range) {
+void VSSIndex::StageUnindexedRange(std::vector<RowRange> &ranges, const RowRange range) {
 	// The first staged range that starts after this one.
 	auto it = std::upper_bound(ranges.begin(), ranges.end(), range.start,
-	                           [](row_t start, const VSSRowRange &staged) { return start < staged.start; });
+	                           [](row_t start, const RowRange &staged) { return start < staged.start; });
 	if (it != ranges.begin() && std::prev(it)->end > range.start) {
 		--it;
 		it->end = MaxValue<row_t>(it->end, range.end);
@@ -980,7 +793,7 @@ void VSSIndex::StageUnindexedRange(std::vector<VSSRowRange> &ranges, const VSSRo
 
 // Deleted rows that were never indexed have nothing left to index: take them out of their staged ranges. Only the
 // ranges between the smallest and the largest row id are rebuilt, and spliced back at once.
-void VSSIndex::RemoveUnindexedRows(std::vector<VSSRowRange> &ranges, const row_t *const row_ids, const idx_t count) {
+void VSSIndex::RemoveUnindexedRows(std::vector<RowRange> &ranges, const row_t *const row_ids, const idx_t count) {
 	if (ranges.empty() || count == 0) {
 		return;
 	}
@@ -988,13 +801,13 @@ void VSSIndex::RemoveUnindexedRows(std::vector<VSSRowRange> &ranges, const row_t
 	std::sort(sorted_ids.begin(), sorted_ids.end());
 	// The first range that ends after the smallest row id, and the first that starts after the largest one.
 	const auto first = std::upper_bound(ranges.begin(), ranges.end(), sorted_ids.front(),
-	                                    [](row_t id, const VSSRowRange &range) { return id < range.end; });
+	                                    [](row_t id, const RowRange &range) { return id < range.end; });
 	const auto last = std::upper_bound(first, ranges.end(), sorted_ids.back(),
-	                                   [](row_t id, const VSSRowRange &range) { return id < range.start; });
+	                                   [](row_t id, const RowRange &range) { return id < range.start; });
 	if (first == last) {
 		return;
 	}
-	std::vector<VSSRowRange> rebuilt;
+	std::vector<RowRange> rebuilt;
 	auto id = sorted_ids.begin();
 	for (auto it = first; it != last; ++it) {
 		row_t start = it->start;
@@ -1330,7 +1143,7 @@ IndexStorageInfo VSSIndex::SerializeToDisk(QueryContext context,
 	}
 	// The rewritten row groups were paged again: free what they no longer use. Reserving more could throw, which a
 	// checkpoint must not: the next sync reserves any growth.
-	const auto self_managed_bytes = static_cast<int64_t>(vss_wrapper->GetSelfManagedMemorySizeInBytes());
+	const auto self_managed_bytes = static_cast<int64_t>(GetSelfManagedMemorySizeInBytes());
 	const auto reserved = static_cast<int64_t>(reserved_memory_bytes.load());
 	if (self_managed_bytes < reserved) {
 		UpdateReservedMemory(self_managed_bytes - reserved);
