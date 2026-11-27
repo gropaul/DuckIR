@@ -1,11 +1,11 @@
-#include "index/search/vss_search_guard.hpp"
+#include "index/vss/search/vss_search_guard.hpp"
 
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/table/index_entry.hpp"
 #include "duckdb/storage/table/table_index_list.hpp"
 
-#include "index/vss_index.hpp"
+#include "index/vss/vss_index.hpp"
 
 namespace duckdb {
 

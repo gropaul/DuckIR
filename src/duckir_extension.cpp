@@ -1,6 +1,6 @@
 #include "duckir_extension.hpp"
 
-#include "index/vss_module.hpp"
+#include "index/vss/vss_module.hpp"
 
 namespace duckdb {
 

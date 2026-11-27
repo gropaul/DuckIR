@@ -2,7 +2,7 @@
 
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 
-#include "index/search/vss_search_guard.hpp"
+#include "index/vss/search/vss_search_guard.hpp"
 
 namespace duckdb {
 
