@@ -34,10 +34,15 @@ jobs:
       extension_name: duckir
       format_checks: 'format'
 
+  regression-prepare:
+    name: Regression Prepare
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/RegressionPrepare.yml
+
   regression-test:
     name: Regression Test
-    needs: duckdb-stable-build
-    if: github.event_name == 'pull_request'
+    needs: [duckdb-stable-build, regression-prepare]
+    if: github.event_name == 'pull_request' && needs.regression-prepare.outputs.run_regression == 'true'
     uses: ./.github/workflows/RegressionTest.yml
     # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts.
     permissions:

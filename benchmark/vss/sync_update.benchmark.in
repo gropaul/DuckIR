@@ -5,6 +5,8 @@
 name Sync DUCKIR_VSS ${QUANTIZATION} after update
 group vss
 
+require core_functions
+
 require parquet
 
 require duckir

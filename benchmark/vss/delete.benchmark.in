@@ -5,6 +5,8 @@
 name Delete DUCKIR_VSS ${QUANTIZATION}
 group vss
 
+require core_functions
+
 require parquet
 
 require duckir
