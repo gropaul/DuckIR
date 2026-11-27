@@ -1,0 +1,21 @@
+name: Check run test
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        required: true
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ inputs.sha }}
+    steps:
+      - run: |
+          for conclusion in neutral action_required; do
+            gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="_Regression Report $conclusion" -f head_sha="$SHA" \
+              -f status=completed -f conclusion="$conclusion" -f details_url="https://github.com/gropaul/DuckIR/actions/runs/46033163010/artifacts/15216167822" \
+              -f "output[title]=Order test: $conclusion" -f "output[summary]=Order test"
+          done
