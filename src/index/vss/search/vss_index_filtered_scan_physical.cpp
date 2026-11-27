@@ -4,6 +4,7 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_lock.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/transaction/local_storage.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
@@ -139,7 +140,7 @@ public:
 	// Temporary row group staging area.
 	idx_t current_row_group_id {0};
 	// The row ids covered by the row group at current_row_group_id. Empty until the first row arrives.
-	VSSRowRange current_row_group_range {0, 0};
+	RowRange current_row_group_range = RowRange::Empty();
 	// The row ids of the current row group that passed the predicate and were thus emitted by the child operator (e.g.,
 	// sequential scan operator). size_t because they are handed to PDX as-is.
 	std::vector<size_t> current_row_group_passing_rowids;
@@ -228,7 +229,7 @@ SinkResultType PhysicalVSSIndexFilteredScan::Sink(ExecutionContext &context, Dat
 	idx_t num_passing_rowids = passing_rowids.size();
 	passing_rowids.resize(num_passing_rowids + input_chunk_size);
 	size_t *passing_rowids_data = passing_rowids.data();
-	VSSRowRange row_group_range = l_sink.current_row_group_range;
+	RowRange row_group_range = l_sink.current_row_group_range;
 	for (idx_t i = 0; i < input_chunk_size; i++) {
 		const row_t row_id = input_chunk_row_ids[i];
 		if (row_id < row_group_range.start || row_id >= row_group_range.end) {

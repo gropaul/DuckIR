@@ -9,9 +9,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/storage_lock.hpp"
-#include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/common/enums/operator_result_type.hpp"
-#include "duckdb/common/enums/scan_options.hpp"
 #include <atomic>
 #include <condition_variable>
 
@@ -19,25 +17,10 @@
 #include "index/vss/vss_memory_allocator.hpp"
 #include "index/vss/vss_storage.hpp"
 #include "index/vss/vss_wrapper.hpp"
+#include "index/core/rg_partitioned_index.hpp"
 #include "index/vss/search/vss_search_guard.hpp"
 
 namespace duckdb {
-
-// [start, end)
-template <class T>
-struct Range {
-	T start;
-	T end;
-
-	bool Contains(const T value) const {
-		return start <= value && value < end;
-	}
-	bool IsEmpty() const {
-		return start >= end;
-	}
-};
-
-using VSSRowRange = Range<row_t>;
 
 struct VSSIndexStats {
 	string metric;
@@ -64,86 +47,6 @@ struct VSSIndexStats {
 // Therefore, CREATE INDEX reserves this memory for the blocks it reads.
 static constexpr idx_t DUCKDB_TABLE_SCAN_METADATA_BYTES_PER_BLOCK = 700;
 
-// todo@gropaul: Move to its own file in core/
-// Scans `column_ids` (row id last) of `row_id_ranges` (sorted, disjoint) as of its own snapshot, not the calling
-// query's.
-class TableRangeScanner {
-public:
-	TableRangeScanner(DataTable &table, Allocator &allocator, vector<StorageIndex> column_ids,
-	                  const vector<LogicalType> &types, const TransactionData &transaction,
-	                  const std::vector<VSSRowRange> &row_id_ranges);
-
-	// Per range, NULL values included.
-	std::vector<idx_t> rows_returned;
-	// The rows Next read last. `sel` selects the `sel_count` inside the ranges, unset when all are.
-	DataChunk chunk;
-	SelectionVector sel;
-	idx_t sel_count = 0;
-
-public:
-	// Reads the next chunk with rows inside the ranges, row ids flat; false once all ranges are read.
-	bool Next();
-
-private:
-	DataTable &table;
-	const ScanOptions scan_options;
-	const vector<StorageIndex> column_ids;
-	// The current TableScanState reads row_id_ranges[current_ranges.start, current_ranges.end); start moves to the
-	// range the last row matched.
-	const std::vector<VSSRowRange> &row_id_ranges;
-	Range<idx_t> current_ranges {0, 0};
-	// One per range group: DuckDB starts a TableScanState only once.
-	unique_ptr<TableScanState> table_scan_state;
-};
-
-// todo@gropaul: Move to RGPartitionedIndex
-// What VSSIndex::Sink does with a row the index cannot take, for VSS an embedding with NaN, infinite or too large
-// values, for FTS e.g. rows that are no valid UTF-8: CREATE INDEX throws, the sync skips it
-enum class UnindexableRowAction : uint8_t { SKIP, THROW };
-
-// The rows of one DuckDB row group a sink state takes (VSSIndex::InitializeIndexSinkState).
-struct IndexSinkInput {
-	IndexSinkInput(const VSSRowGroupBounds row_group, const idx_t num_rows, const idx_t num_threads,
-	               const UnindexableRowAction unindexable_row_action = UnindexableRowAction::SKIP)
-	    : row_group(row_group), num_rows(num_rows), num_threads(num_threads),
-	      unindexable_row_action(unindexable_row_action) {
-	}
-
-	// The DuckDB row group the rows are in.
-	VSSRowGroupBounds row_group;
-	// At most row_group.count.
-	idx_t num_rows;
-	// The threads the state's work on its row group runs on.
-	idx_t num_threads;
-	UnindexableRowAction unindexable_row_action;
-};
-
-// What an index keeps while it takes rows chunk by chunk (VSSIndex::Sink), one per concurrent build.
-struct IndexSinkState {
-	explicit IndexSinkState(const IndexSinkInput &input) : input(input), indexable_sel(STANDARD_VECTOR_SIZE) {
-	}
-	virtual ~IndexSinkState() = default;
-
-	const IndexSinkInput input;
-	// The rows the sink took, and their ids: set by InitializeIndexSinkState, null for the SAQ sample.
-	idx_t count = 0;
-	unique_array<row_t> row_ids;
-	// Selection of Rows that are not NULL and not unindexable (e.g., wrong vector dimension)
-	SelectionVector indexable_sel;
-
-	// Whether the state's work on its row group runs on several threads. Other states can still run at the same
-	// time on other row groups (CREATE INDEX's concurrent builds)
-	bool IsParallel() const {
-		return input.num_threads > 1;
-	}
-
-	template <class TARGET>
-	TARGET &Cast() {
-		DynamicCastCheck<TARGET>(this);
-		return reinterpret_cast<TARGET &>(*this);
-	}
-};
-
 // VSSIndex::Sink writes up to `max_rows` non-NULL embeddings to `embeddings`, rotated if `rotate`. Non-finite ones it
 // skips or throws on, by `unindexable_row_action`.
 struct VSSIndexSinkState : public IndexSinkState {
@@ -161,7 +64,7 @@ struct VSSIndexSinkState : public IndexSinkState {
 	BufferHandle embeddings_buffer;
 };
 
-class VSSIndex : public BoundIndex {
+class VSSIndex final : public RGPartitionedIndex {
 public:
 	static constexpr const char *TYPE_NAME = "DUCKIR_VSS";
 
@@ -220,13 +123,13 @@ private:
 
 	// Row ids committed to the table whose embeddings are not in the index yet: the sync's working list, only used
 	// under the exclusive search lock. Each sync indexes it and keeps the rows whose commit is still in flight.
-	std::vector<VSSRowRange> unindexed_row_ranges;
+	std::vector<RowRange> unindexed_row_ranges;
 	std::atomic<bool> has_unindexed_rows {false};
 	// A commit never waits for the search lock. It stages its changes in an inbox under this small lock instead, which
 	// the next sync empties at its start: Insert's rows (staged_row_ranges, moved to unindexed_row_ranges), and
 	// Delete's rows when it cannot take the search lock at once (staged_deletes, applied first: ApplyStagedDeletes).
 	std::mutex commit_staging_lock;
-	std::vector<VSSRowRange> staged_row_ranges;
+	std::vector<RowRange> staged_row_ranges;
 	std::vector<row_t> staged_deletes;
 	std::atomic<bool> has_staged_deletes {false};
 	// Under commit_staging_lock: the persisted directory's row groups end at persisted_row_end, and since that
@@ -242,79 +145,52 @@ private:
 	ErrorData bind_error;
 	IndexStorageInfo persisted_storage_info;
 
-	BufferManager &buffer_manager;
-	std::atomic<idx_t> reserved_memory_bytes {0};
 	// See ReserveTableScanMetadata
 	std::atomic<idx_t> table_scan_reserved_bytes {0};
-	// Reserves `delta` more bytes, or frees `-delta`. Throws DuckDB's out-of-memory error when nothing more can be
-	// evicted.
-	void UpdateReservedMemory(int64_t delta);
 
 	void AppendRows(idx_t row_group_idx, const row_t *row_ids, float *transformed_embeddings, idx_t count,
 	                PDX::ParallelExecutor *executor);
 	void DeleteRow(row_t row_id);
 
-	// Scans the committed rows of `ranges` into `sink_state` until Sink returns FINISHED. rows_returned: per range.
-	void ScanAndSinkRows(DataTable &table, const std::vector<VSSRowRange> &ranges, IndexSinkState &sink_state,
-	                     std::vector<idx_t> &rows_returned, bool all_committed = false);
-
 public:
-	// todo@gropaul: Should become a virtual of RGPartitionedIndex, implemented by each index
-	// Takes the `count` rows of `chunk` that `sel` selects, all of them if it is unset.
-	SinkResultType Sink(IndexSinkState &sink_state, DataChunk &chunk, const SelectionVector &sel, idx_t count);
-	// todo@gropaul: Becomes a virtual of RGPartitionedIndex, implemented by each index
-	// A sink state for `sink_input.num_rows` rows of one row group.
-	unique_ptr<IndexSinkState> InitializeIndexSinkState(ClientContext &context, const IndexSinkInput &sink_input);
-	// todo@gropaul: Move up to RGPartitionedIndex
-	// Builds the state's row group from the rows it took. Two states of one row group (a row group DuckDB split over
-	// scan tasks) append the second's rows.
-	void BuildRowGroupIndex(IndexSinkState &sink_state, DataTable &table);
-	// todo@gropaul: Move up to RGPartitionedIndex
-	// Adds the state's rows to the index's row group at row_group_idx, which already exists.
-	void AppendToRowGroupIndex(IndexSinkState &sink_state, idx_t row_group_idx);
+	SinkResultType Sink(IndexSinkState &sink_state, DataChunk &chunk, const SelectionVector &sel, idx_t count) override;
+	unique_ptr<IndexSinkState> InitializeIndexSinkState(ClientContext &context,
+	                                                    const IndexSinkInput &sink_input) override;
+	void BuildRowGroupIndex(IndexSinkState &sink_state, DataTable &table) override;
+	void AppendToRowGroupIndex(IndexSinkState &sink_state, idx_t row_group_idx) override;
 
 private:
 	// Indexes the `indexable_count` rows the state's indexable_sel selects in the flattened `chunk`, or its first ones
 	// without HAS_SEL.
 	template <bool HAS_SEL>
 	SinkResultType SinkInternal(VSSIndexSinkState &state, DataChunk &chunk, idx_t indexable_count);
-	// As of the last published commit, or with `all_committed` of every commit, published or not.
-	TransactionData GetCommittedSnapshot(bool all_committed = false) const;
-	// The columns a TableRangeScanner of the indexed rows reads: the indexed column and the row ids.
-	vector<StorageIndex> GetScanColumnIds() const;
-	vector<LogicalType> GetScanTypes() const;
-
-	// The committed rows of [start, end), ascending, written to `row_ids`. Scans only the row id column, so it reads no
-	// column data.
-	idx_t FetchCommittedRowIds(DataTable &table, row_t start, row_t end, row_t *row_ids);
-
 	// The first sync after the index was loaded from storage. The index can lack rows the table has (a crash before the
 	// first checkpoint, inserts in WAL replays DuckDB dropped, #26112) and hold rows the table deleted (deletes in
 	// those replays). Also the first sync after CREATE INDEX.
 	void ReconcileWithTable(DataTable &table);
-	void ReconcileRowGroup(row_t start, row_t end, const row_t *row_ids, idx_t count,
-	                       const std::function<void(row_t, row_t)> &stage);
+	void ReconcileRowGroup(RowRange range, const row_t *row_ids, idx_t count,
+	                       const std::function<void(RowRange)> &stage);
 
 	// Find row groups whose mirrors are stale:
 	// - DuckDB merged two or more row groups into one
 	// - DuckDB dropped a rowgroup (e.g., VACUUM, CHECKPOINT merging)
-	vector<VSSRowGroupBounds> FindStaleRowGroups(DataTable &table) const;
+	vector<RowRange> FindStaleRowGroups(DataTable &table) const;
 
 	// Marks the mirrors of the row groups DuckDB closed since (IsClosedRowGroup).
 	void MarkClosedRowGroups(DataTable &table);
 
-	void RemoveRowGroupsOverlapping(row_t start, row_t end);
+	void RemoveRowGroupsOverlapping(RowRange range);
 
 	// Staged rows that a mirror already holds reuse the ids of a row group DuckDB dropped (all its rows deleted): the
 	// mirror's stale rows would shadow them. Deletes those, so the append indexes the new rows.
-	void DeleteStaleRowIds(const std::vector<VSSRowRange> &ranges);
+	void DeleteStaleRowIds(const std::vector<RowRange> &ranges);
 
 	// Adds the rows of one commit to `ranges` (unindexed_row_ranges or staged_row_ranges), which needs to stay sorted
 	// and disjoint. A range that overlaps staged ones (DuckDB replaying a commit from the WAL) is merged with them.
-	static void StageUnindexedRange(std::vector<VSSRowRange> &ranges, VSSRowRange range);
+	static void StageUnindexedRange(std::vector<RowRange> &ranges, RowRange range);
 
 	// Takes deleted rows out of `ranges` in one pass: a Delete splits the staged ranges of a bulk insert.
-	static void RemoveUnindexedRows(std::vector<VSSRowRange> &ranges, const row_t *row_ids, idx_t count);
+	static void RemoveUnindexedRows(std::vector<RowRange> &ranges, const row_t *row_ids, idx_t count);
 
 	// Deletes these rows from the index and from unindexed_row_ranges, under the exclusive search lock. A sync applies
 	// the staged deletes before it moves the inbox's ranges to unindexed_row_ranges: a reused row id's new row stays.
@@ -324,12 +200,8 @@ private:
 	// - No unindexed rows
 	// - Every mirrored row group matches its DuckDB row group.
 	bool IsInSyncWithTable(DataTable &table) const;
-	// todo@gropaul: Move up to RGPartitionedIndex
-	// The index's own work at the end of a sync, after the closed row groups are marked.
-	void FinishSync();
-	// todo@gropaul: Move up to RGPartitionedIndex
-	// The memory the index holds outside DuckDB's buffers, which the index reserves itself (UpdateReservedMemory).
-	uint64_t GetSelfManagedMemorySizeInBytes() const;
+	void FinishSync() override;
+	uint64_t GetSelfManagedMemorySizeInBytes() const override;
 
 	// The index's storage: the directory chain points to the rotation chain, the SAQ model chain and to each row
 	// group's chain.
@@ -407,24 +279,11 @@ public:
 	// Rows whose commit is still in flight stay unindexed.
 	void SyncWithTable(ClientContext &context, DataTable &table);
 
-	idx_t GetRowGroupSize() const;
-
-	// The DuckDB row group that holds row_id. False if the row is not in the table (yet).
-	bool TryGetPhysicalRowGroup(DataTable &table, row_t row_id, VSSRowGroupBounds &result) const;
-
-	// Whether DuckDB appends no more rows to the row group. It appends only to the last one, until it is full or
-	// another one follows it (a commit that merges its own row groups, or an append that requires a new one).
-	bool IsClosedRowGroup(DataTable &table, const VSSRowGroupBounds &row_group) const;
-
-	vector<VSSRowGroupBounds> GetPhysicalRowGroups(DataTable &table) const;
-
-	idx_t GetLargestRowGroupCount(DataTable &table) const;
-
 	// Position of the index's row group that holds row_id (the row_group_idx of the methods below).
 	optional_idx LookupRowGroup(row_t row_id) const;
 
 	// The row ids the index's row group at row_group_idx covers.
-	VSSRowRange GetRowGroupRange(idx_t row_group_idx) const;
+	RowRange GetRowGroupRange(idx_t row_group_idx) const;
 
 	// Every row of the index's row group at row_group_idx was deleted.
 	bool IsEmptyRowGroup(idx_t row_group_idx) const;
@@ -432,8 +291,8 @@ public:
 	// CREATE INDEX fits a u4 index before its parallel builds when a row group could reach
 	// MIN_EMBEDDINGS_FOR_CLUSTERING rows, on committed rows sampled from every row group.
 	void FitSAQModelForCreate(ClientContext &context, DataTable &table);
-	void SetUpIndexForRowGroup(const row_t *row_ids, float *embeddings, idx_t num_embeddings, row_t row_start,
-	                           idx_t count, bool is_closed, PDX::ParallelExecutor *executor);
+	void SetUpIndexForRowGroup(const row_t *row_ids, float *embeddings, idx_t num_embeddings, RowRange row_group_range,
+	                           bool is_closed, PDX::ParallelExecutor *executor);
 	// Makes room for DuckDB's metadata for the scan of the indexed column on CREATE INDEX.
 	void ReserveTableScanMetadata(idx_t num_rows);
 	uint64_t EstimateBuildPeakBytes(idx_t num_embeddings) const;

@@ -86,7 +86,7 @@ static void FlushRowGroup(CreateVSSIndexGlobalSinkState &g_sink, CreateVSSIndexL
 		return;
 	}
 	auto &vss_index = g_sink.global_index->Cast<VSSIndex>();
-	vss_index.ReserveTableScanMetadata(l_sink.sink_state->input.row_group.count);
+	vss_index.ReserveTableScanMetadata(l_sink.sink_state->input.row_group_range.Size());
 	vss_index.BuildRowGroupIndex(*l_sink.sink_state, table);
 	l_sink.sink_state.reset();
 	annotated_lock_guard<annotated_mutex> guard(g_sink.lock);
@@ -124,14 +124,14 @@ SinkResultType PhysicalCreateVSSIndex::Sink(ExecutionContext &context, DataChunk
 	const auto row_id_data = FlatVector::GetData<row_t>(row_id_column);
 
 	// A chunk never spans two DuckDB row groups, so the first row id tells which one this chunk belongs to.
-	VSSRowGroupBounds row_group;
-	if (!vss_index.TryGetPhysicalRowGroup(table.GetStorage(), row_id_data[0], row_group)) {
+	const auto row_group_range = vss_index.GetPhysicalRowGroupRange(table.GetStorage(), row_id_data[0]);
+	if (row_group_range.IsEmpty()) {
 		throw InternalException("DuckIR VSS: row id %lld is not in any row group of the table", row_id_data[0]);
 	}
-	D_ASSERT(!l_sink.sink_state || l_sink.sink_state->input.row_group.row_start <= row_group.row_start);
+	D_ASSERT(!l_sink.sink_state || l_sink.sink_state->input.row_group_range.start <= row_group_range.start);
 
 	// If we detect a new row group, then finalize the previous row group and prepare to process the new one.
-	if (l_sink.sink_state && row_group.row_start != l_sink.sink_state->input.row_group.row_start) {
+	if (l_sink.sink_state && row_group_range.start != l_sink.sink_state->input.row_group_range.start) {
 		FlushRowGroup(g_sink, l_sink, table.GetStorage());
 	}
 	if (!l_sink.sink_state) {
@@ -144,13 +144,13 @@ SinkResultType PhysicalCreateVSSIndex::Sink(ExecutionContext &context, DataChunk
 			g_sink.running_builds++;
 		}
 		// CREATE INDEX rejects the embeddings it cannot cluster.
-		const IndexSinkInput sink_input(row_group, row_group.count, g_sink.default_threads_per_build,
+		const IndexSinkInput sink_input(row_group_range, row_group_range.Size(), g_sink.default_threads_per_build,
 		                                UnindexableRowAction::THROW);
 		l_sink.sink_state = vss_index.InitializeIndexSinkState(context.client, sink_input);
 	}
 
 	// Preprocess and accumulate the embeddings into the row group's buffer.
-	D_ASSERT(l_sink.sink_state->count + num_embeddings <= row_group.count);
+	D_ASSERT(l_sink.sink_state->count + num_embeddings <= row_group_range.Size());
 	return vss_index.Sink(*l_sink.sink_state, input_chunk, SelectionVector(), num_embeddings);
 }
 

@@ -168,7 +168,7 @@ unique_ptr<GlobalSinkState> PhysicalVSSIndexJoin::GetGlobalSinkState(ClientConte
 class VSSIndexJoinLocalSinkState : public LocalSinkState {
 public:
 	idx_t current_row_group_id {0};
-	VSSRowRange current_row_group_range {0, 0};
+	RowRange current_row_group_range = RowRange::Empty();
 	// Sized at the thread's first Sink, once the search started.
 	vector<std::vector<size_t>> passing_row_ids_per_row_group;
 };
@@ -190,7 +190,7 @@ SinkResultType PhysicalVSSIndexJoin::Sink(ExecutionContext &context, DataChunk &
 	chunk.data[0].Flatten();
 	const auto row_ids = FlatVector::GetData<row_t>(chunk.data[0]);
 	const idx_t chunk_size = chunk.size();
-	VSSRowRange row_group_range = l_sink.current_row_group_range;
+	RowRange row_group_range = l_sink.current_row_group_range;
 	std::vector<size_t> *row_group_row_ids = nullptr;
 	size_t *row_group_row_ids_data = nullptr;
 	idx_t num_row_group_row_ids = 0;
