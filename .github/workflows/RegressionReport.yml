@@ -1,0 +1,60 @@
+#
+# Turns the regression logs of a finished PR pipeline run into a CSV and an HTML report, and links the report from the
+# PR's checks. A workflow_run runs from the default branch with the base repository's token, so it can set the status
+# for PRs from forks too; it reads the PR's logs but never runs the PR's code.
+#
+name: Regression Report
+on:
+  workflow_run:
+    workflows: [Main Extension Distribution Pipeline]
+    types: [completed]
+
+jobs:
+  report:
+    name: Report
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A pipeline run without a regression test has no logs.
+      - name: Build the report
+        id: build
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'regression-logs-*' --dir logs || exit 0
+          pr_url="$(gh pr list --repo "$GITHUB_REPOSITORY" --state all --search "$SHA" --json url --jq '.[0].url')"
+          python3 .github/regression/build_report.py regression-samples.csv regression-report.html "$pr_url" \
+            logs/*/runner-*.log > description.txt
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.build.outputs.built == 'true'
+        with:
+          path: regression-samples.csv
+          archive: false
+
+      - id: report
+        if: steps.build.outputs.built == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          path: regression-report.html
+          archive: false
+
+      - name: Link the report
+        if: steps.build.outputs.built == 'true'
+        env:
+          URL: ${{ steps.report.outputs.artifact-url }}
+        run: |
+          echo "[Regression report]($URL)" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="_Regression Report" \
+            -f description="$(cat description.txt)" -f target_url="$URL"
