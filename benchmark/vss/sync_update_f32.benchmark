@@ -1,0 +1,6 @@
+# name: benchmark/vss/sync_update_f32.benchmark
+# description: sync_update with f32 quantization
+# group: [vss]
+
+template benchmark/vss/sync_update.benchmark.in
+QUANTIZATION=f32

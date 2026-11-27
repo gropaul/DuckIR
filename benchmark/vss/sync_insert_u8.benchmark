@@ -1,0 +1,6 @@
+# name: benchmark/vss/sync_insert_u8.benchmark
+# description: sync_insert with u8 quantization
+# group: [vss]
+
+template benchmark/vss/sync_insert.benchmark.in
+QUANTIZATION=u8

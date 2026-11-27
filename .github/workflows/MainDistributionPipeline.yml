@@ -12,6 +12,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # linux_amd64 builds in its own call, so the regression test can start before the other platforms finish.
+  duckdb-stable-build-linux-amd64:
+    name: Build extension binaries linux_amd64
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+    with:
+      duckdb_version: v2.0.1
+      ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
+      extension_name: duckir
+      # vcpkg 2026.06.24 (what extension-ci-tools main uses), for Eigen 5.0.1: the v1.5.6 default (84bab45) has 3.4.1.
+      vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
+      exclude_archs: "linux_amd64_musl;linux_arm64;linux_arm64_musl;osx_amd64;osx_arm64;wasm_eh;wasm_mvp;wasm_threads;windows_amd64;windows_amd64_mingw;windows_arm64"
+
   duckdb-stable-build:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
@@ -23,7 +35,7 @@ jobs:
       vcpkg_commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3
       # mingw: Rtools' CMake (3.24.1) is older than the 3.26 that DuckIR, PDX and SuperKMeans require.
       # wasm_threads: threaded Wasm extensions are broken upstream (extension-ci-tools #391).
-      exclude_archs: "windows_amd64_mingw;wasm_threads"
+      exclude_archs: "linux_amd64;windows_amd64_mingw;wasm_threads"
 
   code-quality-check:
     name: Code Quality Check
@@ -33,3 +45,18 @@ jobs:
       ci_tools_version: 969bc76276acec1c0a3922ff500d2ec3a1a3b037 # v2.0-cyanoptera 2026-10-01 pin
       extension_name: duckir
       format_checks: 'format'
+
+  regression-prepare:
+    name: Regression Prepare
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/RegressionPrepare.yml
+
+  regression-test:
+    name: Regression Test
+    needs: [duckdb-stable-build-linux-amd64, regression-prepare]
+    if: github.event_name == 'pull_request' && needs.regression-prepare.outputs.run_regression == 'true'
+    uses: ./.github/workflows/RegressionTest.yml
+    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts.
+    permissions:
+      actions: read
+      contents: read

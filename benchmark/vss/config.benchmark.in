@@ -1,0 +1,7 @@
+# name: benchmark/vss/config.benchmark.in
+# description: Sizes shared by the benchmark/vss templates; override one with benchmark_runner --<name> <value> (benchmark_runner lowercases argument names)
+# group: [vss]
+
+# The first rows of the 1,000,000 SIFT1M vectors (benchmark/vss/prepare_sift1m.py), in row groups of row_group_size (a multiple of 2,048).
+argument rows 491520
+argument row_group_size 16384

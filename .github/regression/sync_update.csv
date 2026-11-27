@@ -1,0 +1,3 @@
+benchmark/vss/sync_update_f32.benchmark
+benchmark/vss/sync_update_u8.benchmark
+benchmark/vss/sync_update_u4.benchmark

@@ -1,0 +1,29 @@
+# name: benchmark/vss/delete.benchmark.in
+# description: DELETE of every 2nd row from an indexed table of the first rows SIFT1M vectors (benchmark/vss/config.benchmark.in); the index drops the rows at commit
+# group: [vss]
+
+name Delete DUCKIR_VSS ${QUANTIZATION}
+group vss
+
+require core_functions
+
+require parquet
+
+require duckir
+
+include benchmark/vss/config.benchmark.in
+
+load
+ATTACH '${BENCHMARK_DIR}/vss_delete_${QUANTIZATION}.db' AS vss (ROW_GROUP_SIZE ${row_group_size});
+USE vss;
+SET checkpoint_threshold = '10GB';
+CREATE OR REPLACE TABLE base AS SELECT id, emb::FLOAT[128] AS emb FROM read_parquet('benchmark/data/sift1m_base.parquet') WHERE id < ${rows};
+CREATE OR REPLACE TABLE t AS FROM base;
+CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
+
+run
+DELETE FROM t WHERE id % 2 = 0;
+
+cleanup
+CREATE OR REPLACE TABLE t AS FROM base;
+CREATE INDEX idx ON t USING DUCKIR_VSS (emb) WITH (quantization = '${QUANTIZATION}', seed = 0);
