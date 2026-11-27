@@ -58,10 +58,8 @@ jobs:
     uses: ./.github/workflows/RegressionTest.yml
     with:
       folders: ${{ needs.regression-prepare.outputs.folders }}
-    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts and reads
-    # the PR's labels, the report job sets the report's commit status.
+    # A called workflow gets at most its caller's permissions; the regression job downloads the base's artifacts and reads the PR's labels.
     permissions:
       actions: read
       contents: read
       pull-requests: read
-      statuses: write

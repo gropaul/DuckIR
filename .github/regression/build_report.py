@@ -9,7 +9,8 @@ import sys
 from statistics import median
 
 samples_path, report_path, pr_url, *log_paths = sys.argv[1:]
-GROUP = re.compile(r'::group::raw output: (Base|PR) (\S+)')
+# The logs come from the PR's code, so only names and numbers of the expected shapes reach the HTML.
+GROUP = re.compile(r'::group::raw output: (Base|PR) ([\w/.-]+)$')
 rows = ['benchmark,threads,side,run,seconds']
 for log_path in log_paths:
     threads = re.search(r'runner-(\d+)\.log$', log_path)[1]
@@ -19,9 +20,8 @@ for log_path in log_paths:
             side, benchmark = match[1].lower(), match[2]
         elif line.startswith('::endgroup::'):
             side = None
-        elif side and line.startswith(benchmark + '\t'):
-            _, run, seconds = line.split()
-            rows.append(f'{benchmark},{threads},{side},{run},{seconds}')
+        elif side and (match := re.fullmatch(re.escape(benchmark) + r'\t(\d+)\t(\d+\.?\d*)', line.rstrip())):
+            rows.append(f'{benchmark},{threads},{side},{match[1]},{match[2]}')
 samples = '\n'.join(rows) + '\n'
 open(samples_path, 'w').write(samples)
 
