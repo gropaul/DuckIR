@@ -48,7 +48,7 @@ jobs:
 
   regression-prepare:
     name: Regression Prepare
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     uses: ./.github/workflows/RegressionPrepare.yml
 
   regression-test:
