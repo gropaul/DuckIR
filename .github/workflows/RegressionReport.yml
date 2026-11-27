@@ -1,7 +1,7 @@
 #
 # Turns the regression logs of a finished PR pipeline run into a CSV and an HTML report, and links the report from the
-# PR's checks. A workflow_run runs from the default branch with the base repository's token, so it can set the status
-# for PRs from forks too; it reads the PR's logs but never runs the PR's code.
+# PR's checks. A workflow_run runs from the default branch with the base repository's token, so it can add the check
+# to PRs from forks too; it reads the PR's logs but never runs the PR's code.
 #
 name: Regression Report
 on:
@@ -18,7 +18,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-      statuses: write
+      checks: write
     env:
       GH_TOKEN: ${{ github.token }}
       SHA: ${{ github.event.workflow_run.head_sha }}
@@ -56,5 +56,7 @@ jobs:
           URL: ${{ steps.report.outputs.artifact-url }}
         run: |
           echo "[Regression report]($URL)" >> "$GITHUB_STEP_SUMMARY"
-          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="_Regression Report" \
-            -f description="$(cat description.txt)" -f target_url="$URL"
+          # neutral: the report informs and never blocks the PR.
+          gh api "repos/$GITHUB_REPOSITORY/check-runs" -f name="_Regression Report" -f head_sha="$SHA" -f status=completed \
+            -f conclusion=neutral -f details_url="$URL" -f "output[title]=$(cat description.txt)" \
+            -f "output[summary]=[Open the regression report]($URL)"
