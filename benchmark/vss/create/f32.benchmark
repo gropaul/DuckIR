@@ -1,0 +1,6 @@
+# name: benchmark/vss/create/f32.benchmark
+# description: create with f32 quantization
+# group: [vss]
+
+template benchmark/vss/create/create.benchmark.in
+QUANTIZATION=f32

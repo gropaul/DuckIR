@@ -1,6 +1,0 @@
-# name: benchmark/vss/search_f32.benchmark
-# description: search with f32 quantization
-# group: [vss]
-
-template benchmark/vss/search.benchmark.in
-QUANTIZATION=f32

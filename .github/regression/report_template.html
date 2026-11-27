@@ -51,7 +51,7 @@ td.change { font-weight: 600; }
 svg { display: block; width: 100%; }
 svg text { font-size: 12px; fill: var(--muted); }
 svg text.name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; fill: var(--text); }
-svg text.suite { font-weight: 600; fill: var(--text); }
+svg text.folder { font-weight: 600; fill: var(--text); }
 svg text.slower { fill: var(--slower); }
 svg text.faster { fill: var(--faster); }
 #tooltip { position: fixed; pointer-events: none; display: none; background: #fff; border: 1px solid var(--border);
@@ -82,7 +82,7 @@ const RANGES = [
   { title: 'Improvements', sub: `≥ ${LIMIT * 100}% speedup`, color: 'faster', alert: true, test: () => true },
 ];
 const rangeOf = change => RANGES.find(range => range.test(change));
-// path: the selected folders and suite, e.g. 'vss/delete'; '' shows everything.
+// path: the selected folder, e.g. 'vss/delete'; '' shows everything.
 const state = { threads: null, diff: 'relative', view: 'dots', path: '' };
 
 const median = values => {
@@ -99,18 +99,14 @@ const relative = () => state.diff === 'relative';
 const shown = (r, seconds = r.prMedian) => relative() ? seconds / r.baseMedian - 1 : seconds - r.baseMedian;
 const fmtShown = v => relative() ? fmtPercent(v) : fmtDiff(v);
 
-// One result per (threads, benchmark), from the CSV rows: suite, benchmark, threads, ..., side, ..., seconds.
-const [header, ...lines] = document.getElementById('samples').textContent.trim().split('\n');
+// One result per (threads, benchmark), from the CSV rows: benchmark, threads, side, run, seconds.
 const results = new Map();
-for (const line of lines) {
-  const row = Object.fromEntries(line.split(',').map((cell, i) => [header.split(',')[i], cell]));
-  const key = `${row.threads}|${row.benchmark}`;
-  const name = row.benchmark.replace(/^benchmark\//, '').replace(/\.benchmark$/, '');
-  if (!results.has(key)) {
-    // The path is the benchmark's folders below benchmark/, then its suite.
-    results.set(key, { threads: +row.threads, name, path: name.replace(/[^/]*$/, row.suite), base: [], pr: [] });
-  }
-  results.get(key)[row.side].push(+row.seconds);
+for (const line of document.getElementById('samples').textContent.trim().split('\n').slice(1)) {
+  const [benchmark, threads, side, , seconds] = line.split(',');
+  const name = benchmark.replace(/^benchmark\/|\.benchmark$/g, ''), key = `${threads}|${name}`;
+  // path: the benchmark's folder below benchmark/, e.g. vss/insert.
+  if (!results.has(key)) results.set(key, { threads: +threads, name, path: name.replace(/\/[^/]*$/, ''), base: [], pr: [] });
+  results.get(key)[side].push(+seconds);
 }
 for (const r of results.values()) {
   r.baseMedian = median(r.base); r.prMedian = median(r.pr);
@@ -118,7 +114,7 @@ for (const r of results.values()) {
   r.range = rangeOf(r.change);
 }
 const threadCounts = [...new Set([...results.values()].map(r => r.threads))].sort((a, b) => a - b);
-const suites = [...new Set([...results.values()].map(r => r.path))].sort();
+const folders = [...new Set([...results.values()].map(r => r.path))].sort();
 state.threads = threadCounts[0];
 const under = (path, prefix) => !prefix || path === prefix || path.startsWith(prefix + '/');
 
@@ -153,20 +149,19 @@ function renderFilter() {
   const rows = [];
   for (let depth = 0; depth <= selected.length; depth++) {
     const prefix = selected.slice(0, depth).join('/');
-    const below = suites.filter(suite => under(suite, prefix) && suite !== prefix);
+    const below = folders.filter(folder => under(folder, prefix) && folder !== prefix);
     if (!below.length) break;
-    const children = [...new Set(below.map(suite => suite.split('/')[depth]))];
-    const isSuite = child => suites.includes(prefix ? `${prefix}/${child}` : child);
+    const children = [...new Set(below.map(folder => folder.split('/')[depth]))];
     const options = ['', ...children].map(child => [prefix, child].filter(Boolean).join('/'));
     const pressed = selected.slice(0, depth + 1).join('/');
-    rows.push(`<label>${children.every(isSuite) ? 'Suite' : 'Folder'} <span class="buttons">${options.map(option =>
+    rows.push(`<label>Folder <span class="buttons">${options.map(option =>
       `<button data-key="path" data-value="${option}" aria-pressed="${option === pressed}">${option === prefix ? 'All'
-        : option.split('/').pop() + (isSuite(option.split('/').pop()) ? '' : '/')}</button>`).join('')}</span></label>`);
+        : option.split('/').pop() + '/'}</button>`).join('')}</span></label>`);
   }
   document.getElementById('filter').innerHTML = rows.join('');
 }
 
-// One row per benchmark, grouped by suite, on a shared axis: a bar for the median change, or a dot per run.
+// One row per benchmark, grouped by folder, on a shared axis: a bar for the median change, or a dot per run.
 function renderChart(rows) {
   const dots = state.view === 'dots';
   const extent = rows.flatMap(r => dots ? [...r.base, ...r.pr].map(s => Math.abs(shown(r, s))) : [Math.abs(shown(r))]);
@@ -175,10 +170,10 @@ function renderChart(rows) {
   const x = v => left + (W - left - right) * (v + limit) / (2 * limit);
   const circles = (r, runs, y, color) => runs.map(s => `<circle cx="${x(shown(r, s))}" cy="${y}" r="3" fill="var(--${color})" fill-opacity=".6"/>`).join('');
   let y = top, marks = '';
-  for (const suite of suites.filter(suite => under(suite, state.path))) {
-    marks += `<text class="suite" y="${y + 18}">${suite}</text>`;
+  for (const folder of folders.filter(folder => under(folder, state.path))) {
+    marks += `<text class="folder" y="${y + 18}">${folder}/</text>`;
     y += rowH;
-    for (const r of rows.filter(r => r.path === suite)) {
+    for (const r of rows.filter(r => r.path === folder)) {
       const end = x(shown(r)), color = r.range.color;
       marks += `<g data-tip="${r.name}: ${fmtTime(r.baseMedian)} → ${fmtTime(r.prMedian)}">
         <rect width="${W}" y="${y}" height="${rowH}" fill="transparent"/>

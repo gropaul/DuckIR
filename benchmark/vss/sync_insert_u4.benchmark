@@ -1,6 +1,0 @@
-# name: benchmark/vss/sync_insert_u4.benchmark
-# description: sync_insert with u4 quantization
-# group: [vss]
-
-template benchmark/vss/sync_insert.benchmark.in
-QUANTIZATION=u4

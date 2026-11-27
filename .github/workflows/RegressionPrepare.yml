@@ -1,5 +1,5 @@
 #
-# Builds DuckDB's benchmark runner and prepares SIFT1M for the regression test. Called by the main distribution
+# Builds DuckDB's benchmark runner, with httpfs for the SIFT1M download, for the regression test. Called by the main distribution
 # pipeline in parallel with the extension builds; RegressionTest.yml runs once both are done.
 #
 name: Regression Prepare
@@ -8,6 +8,8 @@ on:
     outputs:
       run_regression:
         value: ${{ jobs.benchmark-runner.outputs.run_regression }}
+      folders:
+        value: ${{ jobs.benchmark-runner.outputs.folders }}
 
 jobs:
   # DuckDB's benchmark runner has no DuckIR code: it loads duckir.duckdb_extension, so the base and the PR share it.
@@ -16,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_regression: ${{ steps.changes.outputs.run_regression }}
+      folders: ${{ steps.folders.outputs.folders }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,20 +31,21 @@ jobs:
         env:
           BASE_REF: origin/${{ github.base_ref }}
         run: |
-          run_regression=false
-          prepare=true
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            prepare=false
-            if git diff --name-only "${BASE_REF}...HEAD" |
-              grep -qE '^(src/|benchmark/|\.github/regression/|CMakeLists\.txt$|extension_config\.cmake$|vcpkg\.json$)' &&
-              [ "$(git rev-parse HEAD:duckdb)" = "$(git rev-parse "${BASE_REF}:duckdb")" ]; then
-              run_regression=true
-              prepare=true
-            fi
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "prepare=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "${BASE_REF}...HEAD" |
+            grep -qE '^(src/|benchmark/|\.github/regression/|\.github/settings\.env$|CMakeLists\.txt$|extension_config\.cmake$|vcpkg\.json$)' &&
+            [ "$(git rev-parse HEAD:duckdb)" = "$(git rev-parse "${BASE_REF}:duckdb")" ]; then
+            echo "prepare=true" >> "$GITHUB_OUTPUT"
+            echo "run_regression=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "run_regression=${run_regression}" >> "$GITHUB_OUTPUT"
-          echo "prepare=${prepare}" >> "$GITHUB_OUTPUT"
           echo "duckdb_commit=$(git rev-parse HEAD:duckdb)" >> "$GITHUB_OUTPUT"
+
+      - name: List the benchmark folders
+        id: folders
+        run: |
+          source .github/settings.env
+          echo "folders=$(find $REGRESSION_BENCHMARK_FOLDERS -name '*.benchmark' -exec dirname {} \; | sort -u | jq -Rsc 'split("\n")[:-1]')" >> "$GITHUB_OUTPUT"
 
       - name: Restore benchmark runner
         id: cache
@@ -49,36 +53,21 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: benchmark_runner
-          key: benchmark-runner-linux_amd64-${{ steps.changes.outputs.duckdb_commit }}
+          key: benchmark-runner-httpfs-linux_amd64-${{ steps.changes.outputs.duckdb_commit }}
 
       - name: Build benchmark runner
         if: steps.changes.outputs.prepare == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get install -y ninja-build
+          sudo apt-get install -y ninja-build libssl-dev
           git submodule update --init duckdb
           cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_BENCHMARKS=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="$PWD/duckdb/.github/config/extensions/httpfs.cmake" \
             -DOVERRIDE_GIT_DESCRIBE="$(git -C duckdb describe --tags)" -S duckdb -B build/runner
           cmake --build build/runner --target benchmark_runner
           cp build/runner/benchmark/benchmark_runner benchmark_runner
-
-      # The benchmarks read SIFT1M from benchmark/data/; the regression jobs restore it from this cache.
-      - name: Restore SIFT1M
-        id: sift1m
-        if: steps.changes.outputs.prepare == 'true'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: benchmark/data
-          key: sift1m-${{ hashFiles('benchmark/vss/prepare_sift1m.py', '.github/settings.env') }}
-
-      - name: Prepare SIFT1M
-        if: steps.changes.outputs.prepare == 'true' && steps.sift1m.outputs.cache-hit != 'true'
-        run: |
-          pip install numpy pyarrow h5py
-          python3 benchmark/vss/prepare_sift1m.py
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.changes.outputs.prepare == 'true'
         with:
           name: benchmark-runner
           path: benchmark_runner
-          if-no-files-found: error

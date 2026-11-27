@@ -1,0 +1,6 @@
+# name: benchmark/vss/create/u4.benchmark
+# description: create with u4 quantization
+# group: [vss]
+
+template benchmark/vss/create/create.benchmark.in
+QUANTIZATION=u4

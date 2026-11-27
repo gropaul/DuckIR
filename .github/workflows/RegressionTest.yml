@@ -6,11 +6,16 @@
 name: Regression Test
 on:
   workflow_call:
+    inputs:
+      folders:
+        description: JSON list of the benchmark folders, one regression job each
+        type: string
+        required: true
 
 jobs:
-  # One job per benchmark: .github/regression/<benchmark>.csv lists its benchmark/vss/<benchmark>_<quantization> files.
+  # One job per benchmark folder, which runs every .benchmark file in it.
   regression:
-    name: ${{ matrix.benchmark }}
+    name: ${{ matrix.folder }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -19,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        benchmark: [create_index, sync_insert, delete, sync_update, search]
+        folder: ${{ fromJSON(inputs.folders) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,13 +34,6 @@ jobs:
         with:
           name: benchmark-runner
           path: artifacts/runner
-
-      - name: Restore SIFT1M
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: benchmark/data
-          key: sift1m-${{ hashFiles('benchmark/vss/prepare_sift1m.py', '.github/settings.env') }}
-          fail-on-cache-miss: true
 
       - name: Download the PR's extension
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -66,84 +64,62 @@ jobs:
               "build/$side/release/repository/duckdb/linux_amd64/"
           done
 
+      # The first run of a benchmark downloads its data into duckdb_benchmark_data/. test_runner.py gives the base and the
+      # PR a data directory each, with links to what this one holds, so they skip the download. The database this run
+      # built is removed, so the base never opens one the PR's extension wrote.
+      - name: Download the data
+        run: |
+          ls ${{ matrix.folder }}/*.benchmark > benchmarks.csv
+          build/pr/release/benchmark/benchmark_runner "$(head -1 benchmarks.csv)"
+          rm duckdb_benchmark_data/vss_*
+
       # Reads the labels now rather than from the event, so re-running the job after adding the label picks it up.
-      - name: Pick the size
+      - name: Run regression benchmarks
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          set -a; source .github/settings.env; set +a
+          source .github/settings.env
+          # Without the label, the benchmarks use the default sizes of benchmark/vss/sift1m.benchmark.in.
           if gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' | grep -qx extended-regression-tests; then
-            rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE_EXTENDED
-          else
-            rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE
+            sizes="--benchmark-argument rows=$REGRESSION_MICRO_VSS_SIFT1M_ROWS_EXTENDED --benchmark-argument row_group_size=$REGRESSION_MICRO_VSS_ROW_GROUP_SIZE_EXTENDED"
           fi
-          echo "Running ${rows} rows in row groups of ${row_group_size}"
-          {
-            echo "ROWS=${rows}"
-            echo "ROW_GROUP_SIZE=${row_group_size}"
-            echo "N_THREADS=${REGRESSION_MICRO_N_THREADS}"
-          } >> "$GITHUB_ENV"
-
-      - name: Run regression benchmarks single-threaded
-        run: |
-          # Collects the samples of a failing comparison too, then fails with its exit code.
+          # Runs the multi-threaded comparison after a failing single-threaded one too, then fails with its exit code.
           set +e -o pipefail
-          python3 duckdb/scripts/regression/test_runner.py \
-            --old build/base/release/benchmark/benchmark_runner \
-            --new build/pr/release/benchmark/benchmark_runner \
-            --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
-            --threads 1 \
-            --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
-            --disable-timeout --verbose | tee "runner-1.log"
-          status=$?
-          python3 .github/regression/parse_samples.py samples.csv "${{ matrix.benchmark }}" "1" "$ROWS" "$ROW_GROUP_SIZE" \
-            "runner-1.log"
-          exit "$status"
-
-      - name: Run regression benchmarks multi-threaded
-        if: ${{ !cancelled() }}
-        run: |
-          # Collects the samples of a failing comparison too, then fails with its exit code.
-          set +e -o pipefail
-          python3 duckdb/scripts/regression/test_runner.py \
-            --old build/base/release/benchmark/benchmark_runner \
-            --new build/pr/release/benchmark/benchmark_runner \
-            --benchmarks ".github/regression/${{ matrix.benchmark }}.csv" \
-            --threads "$N_THREADS" \
-            --benchmark-argument "rows=$ROWS" --benchmark-argument "row_group_size=$ROW_GROUP_SIZE" \
-            --disable-timeout --verbose | tee "runner-$N_THREADS.log"
-          status=$?
-          python3 .github/regression/parse_samples.py samples.csv "${{ matrix.benchmark }}" "$N_THREADS" "$ROWS" "$ROW_GROUP_SIZE" \
-            "runner-$N_THREADS.log"
+          status=0
+          for threads in 1 "$REGRESSION_MICRO_N_THREADS"; do
+            python3 duckdb/scripts/regression/test_runner.py --old build/base/release/benchmark/benchmark_runner \
+              --new build/pr/release/benchmark/benchmark_runner --benchmarks benchmarks.csv --threads "$threads" \
+              $sizes --disable-timeout --verbose | tee "runner-$threads.log" || status=$?
+          done
           exit "$status"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
-          name: regression-samples-${{ matrix.benchmark }}
-          path: samples.csv
+          name: regression-logs-${{ strategy.job-index }}
+          path: runner-*.log
 
-  # Merges the samples of every regression job into one CSV and an HTML report, both opened from the run's artifacts.
+  # Turns the logs of every regression job into one CSV and an HTML report, both opened from the run's artifacts.
   report:
     name: Report
     needs: regression
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      statuses: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          pattern: regression-samples-*
-          path: samples
+          pattern: regression-logs-*
+          path: logs
 
       - name: Build the report
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          awk 'FNR > 1 || NR == 1' samples/*/samples.csv > regression-samples.csv
-          python3 .github/regression/build_report.py regression-samples.csv regression-report.html "$PR_URL"
+        run: python3 .github/regression/build_report.py regression-samples.csv regression-report.html "$PR_URL" logs/*/runner-*.log > description.txt
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -156,5 +132,14 @@ jobs:
           path: regression-report.html
           archive: false
 
+      # A commit status shows the report in the PR's checks. PRs from forks get a read-only token, so only the run's
+      # summary links them to the report.
       - name: Link the report
-        run: echo "[Regression report](${{ steps.report.outputs.artifact-url }})" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          URL: ${{ steps.report.outputs.artifact-url }}
+        run: |
+          echo "[Regression report]($URL)" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" -f state=success -f context="Regression report" \
+            -f description="$(cat description.txt)" -f target_url="$URL" || true

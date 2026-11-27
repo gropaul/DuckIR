@@ -1,0 +1,6 @@
+# name: benchmark/vss/update/u8.benchmark
+# description: update with u8 quantization
+# group: [vss]
+
+template benchmark/vss/update/update.benchmark.in
+QUANTIZATION=u8

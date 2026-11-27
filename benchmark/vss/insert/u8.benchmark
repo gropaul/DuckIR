@@ -1,0 +1,6 @@
+# name: benchmark/vss/insert/u8.benchmark
+# description: insert with u8 quantization
+# group: [vss]
+
+template benchmark/vss/insert/insert.benchmark.in
+QUANTIZATION=u8

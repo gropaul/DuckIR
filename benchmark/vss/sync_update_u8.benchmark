@@ -1,6 +1,0 @@
-# name: benchmark/vss/sync_update_u8.benchmark
-# description: sync_update with u8 quantization
-# group: [vss]
-
-template benchmark/vss/sync_update.benchmark.in
-QUANTIZATION=u8

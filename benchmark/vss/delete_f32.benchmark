@@ -1,6 +1,0 @@
-# name: benchmark/vss/delete_f32.benchmark
-# description: delete with f32 quantization
-# group: [vss]
-
-template benchmark/vss/delete.benchmark.in
-QUANTIZATION=f32

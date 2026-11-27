@@ -1,6 +1,0 @@
-# name: benchmark/vss/create_index_u4.benchmark
-# description: create_index with u4 quantization
-# group: [vss]
-
-template benchmark/vss/create_index.benchmark.in
-QUANTIZATION=u4

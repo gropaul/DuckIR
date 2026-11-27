@@ -1,0 +1,8 @@
+# name: benchmark/vss/sift1m.benchmark.in
+# description: Sizes shared by the benchmark/vss templates. Their load downloads SIFT1M from Hugging Face into the cached main database once; later runs skip load and run reload
+# group: [vss]
+
+require httpfs load_only
+
+argument rows 122880
+argument row_group_size 4096

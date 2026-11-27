@@ -1,6 +1,0 @@
-# name: benchmark/vss/sync_insert_f32.benchmark
-# description: sync_insert with f32 quantization
-# group: [vss]
-
-template benchmark/vss/sync_insert.benchmark.in
-QUANTIZATION=f32
